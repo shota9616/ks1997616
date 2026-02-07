@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+"""
+省力化補助金 申請書類生成ツール — Streamlit Web UI
+ヒアリングシート（Excel）+ 決算書PDF + 登記簿PDF から全11種の申請書類を自動生成する。
+"""
+
+import io
+import os
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+
+import streamlit as st
+
+# scripts/ を import path に追加
+sys.path.insert(0, str(Path(__file__).parent / "scripts"))
+
+from main import (
+    read_hearing_sheet,
+    generate_diagrams,
+    generate_business_plan_1_2,
+    generate_business_plan_3,
+    generate_other_documents,
+    OfficerInfo,
+)
+from validate import check_files, check_diagrams, check_docx_text, check_plan3_values
+from pdf_extractor import extract_financial_statements, extract_corporate_registry
+
+# ---------------------------------------------------------------------------
+# ページ設定
+# ---------------------------------------------------------------------------
+st.set_page_config(
+    page_title="省力化補助金 申請書類生成ツール",
+    page_icon="📋",
+    layout="centered",
+)
+
+st.title("省力化補助金 申請書類生成ツール")
+st.caption("ヒアリングシート + 決算書 + 登記簿 から申請に必要な全11種の書類を自動生成します。")
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# ファイルアップロード
+# ---------------------------------------------------------------------------
+st.subheader("1. ファイルアップロード")
+
+uploaded = st.file_uploader(
+    "ヒアリングシート（必須）",
+    type=["xlsx"],
+    help="10シート＋財務情報シートを含むExcelファイル",
+)
+
+col1, col2 = st.columns(2)
+with col1:
+    uploaded_financial = st.file_uploader(
+        "決算書 PDF（任意）",
+        type=["pdf"],
+        help="損益計算書を含む決算書。アップロードすると参考書式の財務データが正確になります。",
+    )
+with col2:
+    uploaded_registry = st.file_uploader(
+        "履歴事項全部証明書 PDF（任意）",
+        type=["pdf"],
+        help="法人登記簿。アップロードすると役員情報・会社情報が正確になります。",
+    )
+
+# サンプルダウンロード
+sample_path = Path(__file__).parent / "examples" / "sample_hearing.xlsx"
+if sample_path.exists():
+    with open(sample_path, "rb") as f:
+        st.download_button(
+            label="サンプルヒアリングシートをダウンロード",
+            data=f.read(),
+            file_name="sample_hearing.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# オプション設定
+# ---------------------------------------------------------------------------
+st.subheader("2. オプション設定")
+
+use_diagrams = st.checkbox("図解も生成する（Gemini API）", value=False)
+
+gemini_api_key = ""
+if use_diagrams:
+    env_key = os.environ.get("GEMINI_API_KEY", "")
+    try:
+        secrets_key = st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:
+        secrets_key = ""
+    if secrets_key == "your-gemini-api-key-here":
+        secrets_key = ""
+
+    if env_key:
+        st.info("環境変数の GEMINI_API_KEY を使用します。")
+        gemini_api_key = env_key
+    elif secrets_key:
+        st.info("Secrets に設定済みの GEMINI_API_KEY を使用します。")
+        gemini_api_key = secrets_key
+    else:
+        gemini_api_key = st.text_input(
+            "GEMINI_API_KEY",
+            type="password",
+            help="Google AI Studio で取得した API キーを入力してください。",
+        )
+
+# Anthropic API Key（PDF読み取り用）
+anthropic_api_key = ""
+if uploaded_financial or uploaded_registry:
+    env_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    try:
+        secrets_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    except Exception:
+        secrets_key = ""
+
+    if env_key:
+        anthropic_api_key = env_key
+    elif secrets_key:
+        anthropic_api_key = secrets_key
+    else:
+        anthropic_api_key = st.text_input(
+            "ANTHROPIC_API_KEY",
+            type="password",
+            help="PDF読み取りに必要です。Anthropic Console で取得してください。",
+        )
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# 書類生成
+# ---------------------------------------------------------------------------
+st.subheader("3. 書類生成")
+
+if st.button("書類を生成する", type="primary", disabled=(uploaded is None)):
+    if uploaded is None:
+        st.warning("ヒアリングシートをアップロードしてください。")
+        st.stop()
+
+    template_dir = Path(__file__).parent / "templates"
+    if not template_dir.exists():
+        st.error("templates/ ディレクトリが見つかりません。")
+        st.stop()
+
+    # --- 一時ディレクトリで作業 ---
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = os.path.join(tmpdir, "output")
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 1. アップロードファイルを一時保存
+        hearing_path = os.path.join(tmpdir, "hearing.xlsx")
+        with open(hearing_path, "wb") as f:
+            f.write(uploaded.getvalue())
+
+        # 2. ヒアリングシート読み込み
+        with st.status("ヒアリングシートを読み込み中...", expanded=True) as status:
+            try:
+                data = read_hearing_sheet(hearing_path)
+                st.write(f"企業名: **{data.company.name}**")
+                st.write(f"業種: {data.company.industry}")
+                st.write(f"設備: {data.equipment.name}")
+                st.write(f"投資額: {data.equipment.total_price:,}円")
+                status.update(label="ヒアリングシート読み込み完了", state="complete")
+            except Exception as e:
+                status.update(label="読み込みエラー", state="error")
+                st.error(f"ヒアリングシートの読み込みに失敗しました: {e}")
+                st.stop()
+
+        # 3. 決算書PDF読み取り（Claude API）
+        if uploaded_financial and anthropic_api_key:
+            with st.status("決算書PDFを読み取り中（Claude API）...", expanded=True) as status:
+                try:
+                    fin_data = extract_financial_statements(
+                        uploaded_financial.getvalue(), anthropic_api_key
+                    )
+                    if fin_data:
+                        # HearingData の財務情報を上書き
+                        if fin_data.get("売上高", 0) > 0:
+                            data.company.revenue_2024 = fin_data["売上高"]
+                            data.company.revenue_2023 = int(fin_data["売上高"] / 1.03)
+                            data.company.revenue_2022 = int(fin_data["売上高"] / 1.03 / 1.03)
+                        if fin_data.get("売上総利益", 0) > 0:
+                            data.company.gross_profit_2024 = fin_data["売上総利益"]
+                            data.company.gross_profit_2023 = int(fin_data["売上総利益"] / 1.03)
+                            data.company.gross_profit_2022 = int(fin_data["売上総利益"] / 1.03 / 1.03)
+                        if "営業利益" in fin_data and fin_data["営業利益"] != 0:
+                            data.company.operating_profit_2024 = fin_data["営業利益"]
+                            data.company.operating_profit_2023 = int(fin_data["営業利益"] / 1.05)
+                            data.company.operating_profit_2022 = int(fin_data["営業利益"] / 1.05 / 1.05)
+                        if fin_data.get("人件費", 0) > 0:
+                            data.company.labor_cost = fin_data["人件費"]
+                        if fin_data.get("減価償却費", 0) > 0:
+                            data.company.depreciation = fin_data["減価償却費"]
+                        if fin_data.get("給与支給総額", 0) > 0:
+                            data.company.total_salary = fin_data["給与支給総額"]
+
+                        st.write(f"売上高: **{fin_data.get('売上高', 0):,}円**")
+                        st.write(f"営業利益: **{fin_data.get('営業利益', 0):,}円**")
+                        st.write(f"人件費: **{fin_data.get('人件費', 0):,}円**")
+                        st.write(f"減価償却費: **{fin_data.get('減価償却費', 0):,}円**")
+                        st.write(f"給与支給総額: **{fin_data.get('給与支給総額', 0):,}円**")
+                        status.update(label="決算書PDF読み取り完了", state="complete")
+                    else:
+                        status.update(label="決算書PDF: データ抽出できず", state="error")
+                        st.warning("決算書PDFからデータを抽出できませんでした。ヒアリングシートの値を使用します。")
+                except Exception as e:
+                    status.update(label="決算書PDF読み取りエラー", state="error")
+                    st.warning(f"決算書PDF読み取りエラー: {e}")
+        elif uploaded_financial and not anthropic_api_key:
+            st.warning("ANTHROPIC_API_KEY が未設定のため、決算書PDFの読み取りをスキップします。")
+
+        # 4. 登記簿PDF読み取り（Claude API）
+        if uploaded_registry and anthropic_api_key:
+            with st.status("履歴事項全部証明書を読み取り中（Claude API）...", expanded=True) as status:
+                try:
+                    reg_data = extract_corporate_registry(
+                        uploaded_registry.getvalue(), anthropic_api_key
+                    )
+                    if reg_data:
+                        # HearingData の会社情報を上書き
+                        if reg_data.get("会社名"):
+                            data.company.name = reg_data["会社名"]
+                        if reg_data.get("本店所在地"):
+                            addr = reg_data["本店所在地"]
+                            data.company.address = addr
+                            # 都道府県を抽出
+                            pref_found = False
+                            for pref in ["東京都", "北海道", "大阪府", "京都府"]:
+                                if addr.startswith(pref):
+                                    data.company.prefecture = pref
+                                    pref_found = True
+                                    break
+                            if not pref_found:
+                                for i, ch in enumerate(addr):
+                                    if ch == "県" and i <= 4:
+                                        data.company.prefecture = addr[:i+1]
+                                        break
+                        if reg_data.get("設立年月日"):
+                            data.company.established_date = reg_data["設立年月日"]
+                        if reg_data.get("資本金", 0) > 0:
+                            data.company.capital = reg_data["資本金"]
+                        if reg_data.get("事業目的"):
+                            data.company.business_description = reg_data["事業目的"]
+
+                        # 役員情報を上書き
+                        officers = reg_data.get("役員", [])
+                        if officers:
+                            data.officers = [
+                                OfficerInfo(
+                                    name=o.get("氏名", ""),
+                                    position=o.get("役職", "役員"),
+                                    birth_date=o.get("就任日", ""),
+                                )
+                                for o in officers
+                            ]
+                            data.company.officer_count = len(data.officers)
+
+                        st.write(f"会社名: **{reg_data.get('会社名', '')}**")
+                        st.write(f"所在地: {reg_data.get('本店所在地', '')}")
+                        st.write(f"設立: {reg_data.get('設立年月日', '')}")
+                        st.write(f"資本金: {reg_data.get('資本金', 0):,}円")
+                        st.write(f"役員数: {len(officers)}名")
+                        status.update(label="履歴事項全部証明書読み取り完了", state="complete")
+                    else:
+                        status.update(label="登記簿PDF: データ抽出できず", state="error")
+                        st.warning("登記簿PDFからデータを抽出できませんでした。")
+                except Exception as e:
+                    status.update(label="登記簿PDF読み取りエラー", state="error")
+                    st.warning(f"登記簿PDF読み取りエラー: {e}")
+        elif uploaded_registry and not anthropic_api_key:
+            st.warning("ANTHROPIC_API_KEY が未設定のため、登記簿PDFの読み取りをスキップします。")
+
+        # 5. 図解生成（オプション）
+        diagrams = {}
+        if use_diagrams and gemini_api_key:
+            with st.status("図解を生成中（11枚）...", expanded=True) as status:
+                os.environ["GEMINI_API_KEY"] = gemini_api_key
+                try:
+                    diagrams = generate_diagrams(data, output_dir)
+                    st.write(f"生成完了: {len(diagrams)}/11 枚")
+                    status.update(label=f"図解生成完了（{len(diagrams)}枚）", state="complete")
+                except Exception as e:
+                    status.update(label="図解生成エラー", state="error")
+                    st.warning(f"図解生成中にエラーが発生しました: {e}")
+        elif use_diagrams and not gemini_api_key:
+            st.warning("GEMINI_API_KEY が未設定のため、図解生成をスキップします。")
+
+        # 6. 書類生成
+        progress = st.progress(0, text="書類を生成中...")
+        generation_steps = []
+
+        # 6-1. 事業計画書その1その2
+        t12 = template_dir / "事業計画書_その1その2_様式.docx"
+        if t12.exists():
+            with st.status("事業計画書（その1＋その2）を生成中...") as status:
+                try:
+                    generate_business_plan_1_2(data, diagrams, output_dir, t12)
+                    generation_steps.append(("事業計画書_その1その2", True, ""))
+                    status.update(label="事業計画書（その1＋その2）完了", state="complete")
+                except Exception as e:
+                    generation_steps.append(("事業計画書_その1その2", False, str(e)))
+                    status.update(label="事業計画書（その1＋その2）エラー", state="error")
+        progress.progress(30, text="事業計画書その3を生成中...")
+
+        # 6-2. 事業計画書その3
+        t3 = template_dir / "事業計画書_その3_様式.xlsx"
+        if t3.exists():
+            with st.status("事業計画書（その3）を生成中...") as status:
+                try:
+                    generate_business_plan_3(data, output_dir, t3)
+                    generation_steps.append(("事業計画書_その3", True, ""))
+                    status.update(label="事業計画書（その3）完了", state="complete")
+                except Exception as e:
+                    generation_steps.append(("事業計画書_その3", False, str(e)))
+                    status.update(label="事業計画書（その3）エラー", state="error")
+        progress.progress(50, text="その他の書類を生成中...")
+
+        # 6-3. その他の書類（9種）
+        with st.status("その他の書類（9種）を生成中...") as status:
+            try:
+                generate_other_documents(data, output_dir, template_dir)
+                generation_steps.append(("その他の書類（9種）", True, ""))
+                status.update(label="その他の書類（9種）完了", state="complete")
+            except Exception as e:
+                generation_steps.append(("その他の書類（9種）", False, str(e)))
+                status.update(label="その他の書類エラー", state="error")
+        progress.progress(80, text="検証中...")
+
+        # 7. 生成結果サマリー
+        st.subheader("生成結果")
+        for name, ok, err in generation_steps:
+            if ok:
+                st.success(f"{name} — 完了")
+            else:
+                st.error(f"{name} — エラー: {err}")
+
+        # 8. 検証
+        st.subheader("検証結果")
+        output_path = Path(output_dir)
+        file_results = check_files(output_path)
+        diagram_results = check_diagrams(output_path)
+        text_results = check_docx_text(output_path)
+        value_results = check_plan3_values(output_path)
+
+        # ファイル存在チェック
+        file_ok = sum(1 for r in file_results if r["ok"])
+        file_total = len(file_results)
+        if file_ok == file_total:
+            st.success(f"ファイル: {file_ok}/{file_total} 全ファイル生成済み")
+        else:
+            st.warning(f"ファイル: {file_ok}/{file_total}")
+            for r in file_results:
+                if not r["ok"]:
+                    st.write(f"  - 未生成: {r['file']}")
+
+        # 文字数チェック
+        if "error" not in text_results:
+            total_chars = text_results.get("total_chars", 0)
+            if text_results.get("ok"):
+                st.success(f"文字数: {total_chars:,}字（基準: {text_results['min_required']:,}字以上）")
+            else:
+                st.warning(f"文字数: {total_chars:,}字（基準: {text_results['min_required']:,}字以上）")
+            sections = text_results.get("sections", {})
+            if sections:
+                with st.expander("セクション別文字数"):
+                    for key in sorted(sections.keys()):
+                        sec = sections[key]
+                        mark = "OK" if sec["ok"] else "NG"
+                        st.write(f"[{mark}] {key}: {sec['chars']:,}字 / {sec['min_required']:,}字")
+
+        # 図解チェック
+        if diagrams:
+            d_found = diagram_results.get("found", 0)
+            d_expected = diagram_results.get("expected", 11)
+            if diagram_results.get("ok"):
+                st.success(f"図解: {d_found}/{d_expected} 枚")
+            else:
+                st.warning(f"図解: {d_found}/{d_expected} 枚")
+
+        # 数値チェック（付加価値額・給与支給総額の成長率）
+        if isinstance(value_results, dict) and "error" not in value_results:
+            has_issues = False
+            for key, val in value_results.items():
+                if isinstance(val, dict) and "ok" in val:
+                    if val["ok"]:
+                        st.success(f"{key}: {val.get('年率', '')} （基準: {val.get('基準', '')}）")
+                    else:
+                        st.error(f"{key}: {val.get('年率', '')} （基準: {val.get('基準', '')}）")
+                        has_issues = True
+            if not has_issues and value_results:
+                st.success("基本要件（付加価値額+3%、給与支給総額+1.5%）をクリアしています")
+
+        progress.progress(100, text="完了")
+
+        # 9. ZIPダウンロード
+        st.divider()
+        st.subheader("ダウンロード")
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(output_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, output_dir)
+                    zf.write(file_path, arcname)
+        zip_buffer.seek(0)
+
+        company_name = data.company.name if data.company.name else "output"
+        st.download_button(
+            label="全書類をZIPでダウンロード",
+            data=zip_buffer.getvalue(),
+            file_name=f"省力化補助金_{company_name}_申請書類.zip",
+            mime="application/zip",
+            type="primary",
+        )
+
+elif uploaded is None:
+    st.info("ヒアリングシート（.xlsx）をアップロードして「書類を生成する」を押してください。")
