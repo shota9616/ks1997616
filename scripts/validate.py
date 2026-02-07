@@ -65,7 +65,7 @@ MIN_CHAR_COUNTS = {
 
 MIN_TOTAL_CHARS = 4700
 
-EXPECTED_DIAGRAM_COUNT = 11
+EXPECTED_DIAGRAM_COUNT = 13
 
 
 # =============================================================================

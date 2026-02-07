@@ -109,24 +109,28 @@ if use_diagrams:
             help="Google AI Studio で取得した API キーを入力してください。",
         )
 
-# Anthropic API Key（PDF読み取り用）
-anthropic_api_key = ""
+# PDF読み取り用にも GEMINI_API_KEY を使用
+pdf_api_key = ""
 if uploaded_financial or uploaded_registry:
-    env_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    env_key = os.environ.get("GEMINI_API_KEY", "")
     try:
-        secrets_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        secrets_key = st.secrets.get("GEMINI_API_KEY", "")
     except Exception:
         secrets_key = ""
+    if secrets_key == "your-gemini-api-key-here":
+        secrets_key = ""
 
-    if env_key:
-        anthropic_api_key = env_key
+    if gemini_api_key:
+        pdf_api_key = gemini_api_key
+    elif env_key:
+        pdf_api_key = env_key
     elif secrets_key:
-        anthropic_api_key = secrets_key
+        pdf_api_key = secrets_key
     else:
-        anthropic_api_key = st.text_input(
-            "ANTHROPIC_API_KEY",
+        pdf_api_key = st.text_input(
+            "GEMINI_API_KEY（PDF読み取り用）",
             type="password",
-            help="PDF読み取りに必要です。Anthropic Console で取得してください。",
+            help="PDF読み取りに必要です。Google AI Studio で取得してください。",
         )
 
 st.divider()
@@ -171,11 +175,11 @@ if st.button("書類を生成する", type="primary", disabled=(uploaded is None
                 st.stop()
 
         # 3. 決算書PDF読み取り（Claude API）
-        if uploaded_financial and anthropic_api_key:
+        if uploaded_financial and pdf_api_key:
             with st.status("決算書PDFを読み取り中（Claude API）...", expanded=True) as status:
                 try:
                     fin_data = extract_financial_statements(
-                        uploaded_financial.getvalue(), anthropic_api_key
+                        uploaded_financial.getvalue(), pdf_api_key
                     )
                     if fin_data:
                         # HearingData の財務情報を上書き
@@ -210,15 +214,15 @@ if st.button("書類を生成する", type="primary", disabled=(uploaded is None
                 except Exception as e:
                     status.update(label="決算書PDF読み取りエラー", state="error")
                     st.warning(f"決算書PDF読み取りエラー: {e}")
-        elif uploaded_financial and not anthropic_api_key:
-            st.warning("ANTHROPIC_API_KEY が未設定のため、決算書PDFの読み取りをスキップします。")
+        elif uploaded_financial and not pdf_api_key:
+            st.warning("GEMINI_API_KEY が未設定のため、決算書PDFの読み取りをスキップします。")
 
         # 4. 登記簿PDF読み取り（Claude API）
-        if uploaded_registry and anthropic_api_key:
+        if uploaded_registry and pdf_api_key:
             with st.status("履歴事項全部証明書を読み取り中（Claude API）...", expanded=True) as status:
                 try:
                     reg_data = extract_corporate_registry(
-                        uploaded_registry.getvalue(), anthropic_api_key
+                        uploaded_registry.getvalue(), pdf_api_key
                     )
                     if reg_data:
                         # HearingData の会社情報を上書き
@@ -271,17 +275,17 @@ if st.button("書類を生成する", type="primary", disabled=(uploaded is None
                 except Exception as e:
                     status.update(label="登記簿PDF読み取りエラー", state="error")
                     st.warning(f"登記簿PDF読み取りエラー: {e}")
-        elif uploaded_registry and not anthropic_api_key:
-            st.warning("ANTHROPIC_API_KEY が未設定のため、登記簿PDFの読み取りをスキップします。")
+        elif uploaded_registry and not pdf_api_key:
+            st.warning("GEMINI_API_KEY が未設定のため、登記簿PDFの読み取りをスキップします。")
 
         # 5. 図解生成（オプション）
         diagrams = {}
         if use_diagrams and gemini_api_key:
-            with st.status("図解を生成中（11枚）...", expanded=True) as status:
+            with st.status("図解を生成中（13枚）...", expanded=True) as status:
                 os.environ["GEMINI_API_KEY"] = gemini_api_key
                 try:
                     diagrams = generate_diagrams(data, output_dir)
-                    st.write(f"生成完了: {len(diagrams)}/11 枚")
+                    st.write(f"生成完了: {len(diagrams)}/13 枚")
                     status.update(label=f"図解生成完了（{len(diagrams)}枚）", state="complete")
                 except Exception as e:
                     status.update(label="図解生成エラー", state="error")
@@ -375,7 +379,7 @@ if st.button("書類を生成する", type="primary", disabled=(uploaded is None
         # 図解チェック
         if diagrams:
             d_found = diagram_results.get("found", 0)
-            d_expected = diagram_results.get("expected", 11)
+            d_expected = diagram_results.get("expected", 13)
             if diagram_results.get("ok"):
                 st.success(f"図解: {d_found}/{d_expected} 枚")
             else:

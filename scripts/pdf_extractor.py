@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PDF読み取りモジュール（Claude API）
+PDF読み取りモジュール（Gemini API）
 
 決算書・履歴事項全部証明書のPDFから構造化データを抽出する。
 """
@@ -9,50 +9,29 @@ import base64
 import json
 import os
 
-try:
-    import anthropic
-    ANTHROPIC_AVAILABLE = True
-except ImportError:
-    ANTHROPIC_AVAILABLE = False
+from google import genai
+from google.genai import types
 
 
-def _call_claude(pdf_bytes: bytes, prompt: str, api_key: str) -> dict:
-    """Claude API にPDFを送信してJSON形式のデータを取得する"""
-    if not ANTHROPIC_AVAILABLE:
-        raise ImportError("anthropic パッケージが必要です: pip install anthropic")
-
-    client = anthropic.Anthropic(api_key=api_key)
+def _call_gemini(pdf_bytes: bytes, prompt: str, api_key: str) -> dict:
+    """Gemini API にPDFを送信してJSON形式のデータを取得する"""
+    client = genai.Client(api_key=api_key)
     pdf_b64 = base64.standard_b64encode(pdf_bytes).decode("utf-8")
 
-    response = client.messages.create(
-        model="claude-sonnet-4-5-20250929",
-        max_tokens=4096,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "document",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": pdf_b64,
-                    },
-                },
-                {
-                    "type": "text",
-                    "text": prompt,
-                },
-            ],
-        }],
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=[
+            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+            prompt,
+        ],
     )
 
-    text = response.content[0].text
+    text = response.text
 
     # ```json ... ``` マーカーを除去
     cleaned = text.strip()
     if cleaned.startswith("```"):
         lines = cleaned.split("\n")
-        # 先頭の ```json と末尾の ``` を除去
         lines = [l for l in lines if not l.strip().startswith("```")]
         cleaned = "\n".join(lines)
 
@@ -113,7 +92,7 @@ def extract_financial_statements(pdf_bytes: bytes, api_key: str) -> dict:
 
 JSONのみ返してください。説明文は不要です。"""
 
-    return _call_claude(pdf_bytes, prompt, api_key)
+    return _call_gemini(pdf_bytes, prompt, api_key)
 
 
 def extract_corporate_registry(pdf_bytes: bytes, api_key: str) -> dict:
@@ -157,4 +136,4 @@ def extract_corporate_registry(pdf_bytes: bytes, api_key: str) -> dict:
 
 JSONのみ返してください。説明文は不要です。"""
 
-    return _call_claude(pdf_bytes, prompt, api_key)
+    return _call_gemini(pdf_bytes, prompt, api_key)
