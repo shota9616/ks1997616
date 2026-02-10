@@ -46,7 +46,7 @@ except ImportError:
 class Config:
     """ハードコード値を集約した設定クラス"""
     # Gemini API
-    GEMINI_MODEL = "nano-banana-pro-preview"
+    GEMINI_MODEL = "gemini-2.0-flash-exp"
     GEMINI_RETRY_MAX = 3
     GEMINI_RETRY_BASE_DELAY = 2  # seconds
     GEMINI_INTER_REQUEST_DELAY = 2  # seconds
