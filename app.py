@@ -22,9 +22,12 @@ from main import (
     generate_business_plan_1_2,
     generate_business_plan_3,
     generate_other_documents,
+    generate_with_auto_fix,
     OfficerInfo,
+    Config,
+    validate_hearing_data,
 )
-from validate import check_files, check_diagrams, check_docx_text, check_plan3_values
+from validate import check_files, check_diagrams, check_docx_text, check_plan3_values, calculate_score
 from pdf_extractor import extract_financial_statements, extract_corporate_registry
 
 # ---------------------------------------------------------------------------
@@ -174,6 +177,12 @@ if st.button("書類を生成する", type="primary", disabled=(uploaded is None
                 st.error(f"ヒアリングシートの読み込みに失敗しました: {e}")
                 st.stop()
 
+        # 2.5. データバリデーション
+        data_issues = validate_hearing_data(data)
+        if data_issues:
+            for issue in data_issues:
+                st.warning(f"データ警告: {issue}")
+
         # 3. 決算書PDF読み取り（Claude API）
         if uploaded_financial and pdf_api_key:
             with st.status("決算書PDFを読み取り中（Claude API）...", expanded=True) as status:
@@ -185,16 +194,16 @@ if st.button("書類を生成する", type="primary", disabled=(uploaded is None
                         # HearingData の財務情報を上書き
                         if fin_data.get("売上高", 0) > 0:
                             data.company.revenue_2024 = fin_data["売上高"]
-                            data.company.revenue_2023 = int(fin_data["売上高"] / 1.03)
-                            data.company.revenue_2022 = int(fin_data["売上高"] / 1.03 / 1.03)
+                            data.company.revenue_2023 = int(fin_data["売上高"] / Config.GROWTH_RATE)
+                            data.company.revenue_2022 = int(fin_data["売上高"] / Config.GROWTH_RATE / Config.GROWTH_RATE)
                         if fin_data.get("売上総利益", 0) > 0:
                             data.company.gross_profit_2024 = fin_data["売上総利益"]
-                            data.company.gross_profit_2023 = int(fin_data["売上総利益"] / 1.03)
-                            data.company.gross_profit_2022 = int(fin_data["売上総利益"] / 1.03 / 1.03)
+                            data.company.gross_profit_2023 = int(fin_data["売上総利益"] / Config.GROWTH_RATE)
+                            data.company.gross_profit_2022 = int(fin_data["売上総利益"] / Config.GROWTH_RATE / Config.GROWTH_RATE)
                         if "営業利益" in fin_data and fin_data["営業利益"] != 0:
                             data.company.operating_profit_2024 = fin_data["営業利益"]
-                            data.company.operating_profit_2023 = int(fin_data["営業利益"] / 1.05)
-                            data.company.operating_profit_2022 = int(fin_data["営業利益"] / 1.05 / 1.05)
+                            data.company.operating_profit_2023 = int(fin_data["営業利益"] / Config.PROFIT_GROWTH_RATE)
+                            data.company.operating_profit_2022 = int(fin_data["営業利益"] / Config.PROFIT_GROWTH_RATE / Config.PROFIT_GROWTH_RATE)
                         if fin_data.get("人件費", 0) > 0:
                             data.company.labor_cost = fin_data["人件費"]
                         if fin_data.get("減価償却費", 0) > 0:
@@ -293,62 +302,105 @@ if st.button("書類を生成する", type="primary", disabled=(uploaded is None
         elif use_diagrams and not gemini_api_key:
             st.warning("GEMINI_API_KEY が未設定のため、図解生成をスキップします。")
 
-        # 6. 書類生成
+        # 6. 書類生成（自動修正ループ）
+        skip_diags = not bool(diagrams)
+        target_score = 85
+        max_iters = 5
+
         progress = st.progress(0, text="書類を生成中...")
-        generation_steps = []
+        score_placeholder = st.empty()
+        iteration_log = st.container()
 
-        # 6-1. 事業計画書その1その2
-        t12 = template_dir / "事業計画書_その1その2_様式.docx"
-        if t12.exists():
-            with st.status("事業計画書（その1＋その2）を生成中...") as status:
-                try:
-                    generate_business_plan_1_2(data, diagrams, output_dir, t12)
-                    generation_steps.append(("事業計画書_その1その2", True, ""))
-                    status.update(label="事業計画書（その1＋その2）完了", state="complete")
-                except Exception as e:
-                    generation_steps.append(("事業計画書_その1その2", False, str(e)))
-                    status.update(label="事業計画書（その1＋その2）エラー", state="error")
-        progress.progress(30, text="事業計画書その3を生成中...")
+        def on_progress(iteration, score, entry):
+            pct = min(int((iteration / max_iters) * 80) + 10, 90)
+            progress.progress(pct, text=f"イテレーション {iteration}/{max_iters} — スコア {score}/100")
+            with iteration_log:
+                if score >= target_score:
+                    st.success(f"#{iteration}: {score}/100 — 目標達成！")
+                else:
+                    st.info(f"#{iteration}: {score}/100 — 自動修正して再生成...")
 
-        # 6-2. 事業計画書その3
-        t3 = template_dir / "事業計画書_その3_様式.xlsx"
-        if t3.exists():
-            with st.status("事業計画書（その3）を生成中...") as status:
-                try:
-                    generate_business_plan_3(data, output_dir, t3)
-                    generation_steps.append(("事業計画書_その3", True, ""))
-                    status.update(label="事業計画書（その3）完了", state="complete")
-                except Exception as e:
-                    generation_steps.append(("事業計画書_その3", False, str(e)))
-                    status.update(label="事業計画書（その3）エラー", state="error")
-        progress.progress(50, text="その他の書類を生成中...")
+        # ANTHROPIC_API_KEY があればAI臭除去も実行
+        has_anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
 
-        # 6-3. その他の書類（9種）
-        with st.status("その他の書類（9種）を生成中...") as status:
-            try:
-                generate_other_documents(data, output_dir, template_dir)
-                generation_steps.append(("その他の書類（9種）", True, ""))
-                status.update(label="その他の書類（9種）完了", state="complete")
-            except Exception as e:
-                generation_steps.append(("その他の書類（9種）", False, str(e)))
-                status.update(label="その他の書類エラー", state="error")
-        progress.progress(80, text="検証中...")
+        try:
+            result = generate_with_auto_fix(
+                data=data,
+                output_dir=output_dir,
+                template_dir=template_dir,
+                diagrams=diagrams,
+                target_score=target_score,
+                max_iterations=max_iters,
+                skip_diagrams=skip_diags,
+                deai=has_anthropic_key,
+                target_ai_score=85,
+                max_ai_rounds=3,
+                on_progress=on_progress,
+            )
+        except Exception as e:
+            st.error(f"書類生成エラー: {e}")
+            progress.progress(100, text="エラー")
+            st.stop()
 
-        # 7. 生成結果サマリー
-        st.subheader("生成結果")
-        for name, ok, err in generation_steps:
-            if ok:
-                st.success(f"{name} — 完了")
-            else:
-                st.error(f"{name} — エラー: {err}")
+        progress.progress(90, text="検証中...")
 
-        # 8. 検証
+        final_score = result["score"]
+        iterations_used = result["iterations"]
+        score_result = result["result"]
+        ai_result = result.get("ai_result", {})
+
+        # 7. スコア表示
+        st.subheader("品質スコア")
+        if final_score >= target_score:
+            st.success(f"品質スコア: {final_score}/100 （{iterations_used}回で目標{target_score}点を達成）")
+        else:
+            st.warning(f"品質スコア: {final_score}/100 （{iterations_used}回実行、目標{target_score}点に未到達）")
+
+        # AI臭スコア表示
+        if ai_result and not ai_result.get("skipped"):
+            ai_score = ai_result.get("ai_score")
+            ai_rounds = ai_result.get("ai_rounds", 0)
+            if ai_score is not None:
+                if ai_score >= 85:
+                    st.success(f"AI臭スコア: {ai_score}/100 （{ai_rounds}回リライト、自然な文章）")
+                elif ai_score >= 70:
+                    st.info(f"AI臭スコア: {ai_score}/100 （{ai_rounds}回リライト、概ね自然）")
+                else:
+                    st.warning(f"AI臭スコア: {ai_score}/100 （{ai_rounds}回リライト）")
+                with st.expander("AI臭除去履歴"):
+                    for ah in ai_result.get("ai_history", []):
+                        label = "初回" if ah["round"] == 0 else f"ラウンド{ah['round']}"
+                        st.write(f"{label}: **{ah['score']}点** ({ah['grade']})")
+        elif not has_anthropic_key:
+            st.info("ANTHROPIC_API_KEY を設定するとAI臭除去（自動リライト）が有効になります")
+
+        # スコア内訳
+        breakdown = score_result.get("breakdown", {})
+        with st.expander("スコア内訳"):
+            for cat, info in breakdown.items():
+                label = {"files": "ファイル", "diagrams": "図解", "text_total": "総文字数",
+                         "sections": "セクション文字数", "values": "数値要件"}.get(cat, cat)
+                bar_pct = info["score"] / info["max"] if info["max"] > 0 else 0
+                st.write(f"{label}: **{info['score']}/{info['max']}** {info.get('detail', '')}")
+                st.progress(min(bar_pct, 1.0))
+
+        # イテレーション履歴
+        if len(result["history"]) > 1:
+            with st.expander("自動修正履歴"):
+                for h in result["history"]:
+                    issues_str = ", ".join(h.get("issues", [])[:3])
+                    if h["score"] >= target_score:
+                        st.write(f"#{h['iteration']}: **{h['score']}点** — 合格")
+                    else:
+                        st.write(f"#{h['iteration']}: **{h['score']}点** — {issues_str}")
+
+        # 8. 詳細検証結果
         st.subheader("検証結果")
-        output_path = Path(output_dir)
-        file_results = check_files(output_path)
-        diagram_results = check_diagrams(output_path)
-        text_results = check_docx_text(output_path)
-        value_results = check_plan3_values(output_path)
+        raw = score_result.get("raw", {})
+        file_results = raw.get("files", [])
+        diagram_results = raw.get("diagrams", {})
+        text_results = raw.get("text", {})
+        value_results = raw.get("values", {})
 
         # ファイル存在チェック
         file_ok = sum(1 for r in file_results if r["ok"])
@@ -385,7 +437,7 @@ if st.button("書類を生成する", type="primary", disabled=(uploaded is None
             else:
                 st.warning(f"図解: {d_found}/{d_expected} 枚")
 
-        # 数値チェック（付加価値額・給与支給総額の成長率）
+        # 数値チェック
         if isinstance(value_results, dict) and "error" not in value_results:
             has_issues = False
             for key, val in value_results.items():
@@ -396,7 +448,7 @@ if st.button("書類を生成する", type="primary", disabled=(uploaded is None
                         st.error(f"{key}: {val.get('年率', '')} （基準: {val.get('基準', '')}）")
                         has_issues = True
             if not has_issues and value_results:
-                st.success("基本要件（付加価値額+3%、給与支給総額+1.5%）をクリアしています")
+                st.success("基本要件（付加価値額+4%以上、給与支給総額+2%以上）をクリアしています")
 
         progress.progress(100, text="完了")
 

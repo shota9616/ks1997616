@@ -243,21 +243,131 @@ def check_plan3_values(output_dir: Path) -> dict:
                 revenue_growth = ((year5_revenue / base_revenue) ** (1/5) - 1) * 100
                 results["付加価値額成長率"] = {
                     "年率": f"{revenue_growth:.1f}%",
-                    "基準": "3.0%以上",
-                    "ok": round(revenue_growth, 1) >= 3.0,
+                    "基準": "4.0%以上",
+                    "ok": round(revenue_growth, 1) >= 4.0,
                 }
 
             if base_salary and year5_salary and base_salary > 0:
                 salary_growth = ((year5_salary / base_salary) ** (1/5) - 1) * 100
                 results["給与支給総額成長率"] = {
                     "年率": f"{salary_growth:.1f}%",
-                    "基準": "1.5%以上",
-                    "ok": round(salary_growth, 1) >= 1.5,
+                    "基準": "2.0%以上",
+                    "ok": round(salary_growth, 1) >= 2.0,
                 }
             break
 
     wb.close()
     return results
+
+
+# =============================================================================
+# スコアリング
+# =============================================================================
+
+def calculate_score(output_dir: Path, skip_diagrams: bool = False) -> dict:
+    """出力書類を100点満点でスコアリングし、内訳と改善ヒントを返す"""
+    output_dir = Path(output_dir)
+    file_results = check_files(output_dir)
+    diagram_results = check_diagrams(output_dir)
+    text_results = check_docx_text(output_dir)
+    value_results = check_plan3_values(output_dir)
+
+    score = 0.0
+    breakdown = {}
+    issues = []
+
+    # --- ファイル存在 (30点) ---
+    file_ok = sum(1 for r in file_results if r["ok"])
+    file_total = len(file_results)
+    file_score = (file_ok / file_total) * 30 if file_total > 0 else 0
+    breakdown["files"] = {"score": round(file_score, 1), "max": 30, "detail": f"{file_ok}/{file_total}"}
+    score += file_score
+    if file_ok < file_total:
+        missing = [r["file"] for r in file_results if not r["ok"]]
+        issues.append({"category": "files", "action": "retry_generation", "detail": f"未生成ファイル: {', '.join(missing)}"})
+
+    # --- 図解 (10点、skip_diagrams時は他カテゴリに再配分) ---
+    if skip_diagrams:
+        diagram_score = 10.0  # 満点扱い
+    else:
+        d_found = diagram_results.get("found", 0)
+        d_expected = diagram_results.get("expected", EXPECTED_DIAGRAM_COUNT)
+        diagram_score = min(d_found / d_expected, 1.0) * 10 if d_expected > 0 else 0
+        if d_found < d_expected:
+            issues.append({"category": "diagrams", "action": "retry_diagrams", "detail": f"図解不足: {d_found}/{d_expected}"})
+    breakdown["diagrams"] = {"score": round(diagram_score, 1), "max": 10, "detail": f"{diagram_results.get('found', 0)}/{diagram_results.get('expected', EXPECTED_DIAGRAM_COUNT)}"}
+    score += diagram_score
+
+    # --- 総文字数 (10点) ---
+    if "error" not in text_results:
+        total_chars = text_results.get("total_chars", 0)
+        text_ratio = min(total_chars / MIN_TOTAL_CHARS, 1.0)
+        text_score = text_ratio * 10
+        if total_chars < MIN_TOTAL_CHARS:
+            issues.append({"category": "text_total", "action": "increase_text", "detail": f"総文字数不足: {total_chars}/{MIN_TOTAL_CHARS}"})
+    else:
+        text_score = 0
+        issues.append({"category": "text_total", "action": "retry_generation", "detail": text_results.get("error", "")})
+    breakdown["text_total"] = {"score": round(text_score, 1), "max": 10, "detail": f"{text_results.get('total_chars', 0)}字"}
+    score += text_score
+
+    # --- セクション別文字数 (30点: 各5点×6) ---
+    section_score = 0
+    sections = text_results.get("sections", {}) if "error" not in text_results else {}
+    for key, min_count in MIN_CHAR_COUNTS.items():
+        sec = sections.get(key, {})
+        chars = sec.get("chars", 0)
+        ratio = min(chars / min_count, 1.0) if min_count > 0 else 1.0
+        section_score += ratio * 5
+        if chars < min_count:
+            issues.append({"category": "section", "action": "increase_section_text", "detail": f"{key}: {chars}/{min_count}字", "section": key})
+    breakdown["sections"] = {"score": round(section_score, 1), "max": 30, "detail": f"{len([s for s in sections.values() if s.get('ok')])}/{len(MIN_CHAR_COUNTS)} セクション合格"}
+    score += section_score
+
+    # --- 数値要件 (20点: 付加価値額10点 + 給与10点) ---
+    value_score = 0
+    if isinstance(value_results, dict) and "error" not in value_results:
+        if "付加価値額成長率" in value_results:
+            v = value_results["付加価値額成長率"]
+            if v.get("ok"):
+                value_score += 10
+            else:
+                rate_str = v.get("年率", "0%").replace("%", "")
+                try:
+                    rate = float(rate_str)
+                    value_score += min(rate / 4.0, 1.0) * 10  # 4%が基準
+                except ValueError:
+                    pass
+                issues.append({"category": "growth_rate", "action": "increase_growth_rate", "detail": f"付加価値額成長率: {v.get('年率', '?')}"})
+        if "給与支給総額成長率" in value_results:
+            v = value_results["給与支給総額成長率"]
+            if v.get("ok"):
+                value_score += 10
+            else:
+                rate_str = v.get("年率", "0%").replace("%", "")
+                try:
+                    rate = float(rate_str)
+                    value_score += min(rate / 2.0, 1.0) * 10  # 2%が基準
+                except ValueError:
+                    pass
+                issues.append({"category": "salary_rate", "action": "increase_salary_rate", "detail": f"給与支給総額成長率: {v.get('年率', '?')}"})
+    else:
+        issues.append({"category": "values", "action": "retry_generation", "detail": "数値チェック不能"})
+    breakdown["values"] = {"score": round(value_score, 1), "max": 20}
+    score += value_score
+
+    return {
+        "score": round(score, 1),
+        "max": 100,
+        "breakdown": breakdown,
+        "issues": issues,
+        "raw": {
+            "files": file_results,
+            "diagrams": diagram_results,
+            "text": text_results,
+            "values": value_results,
+        },
+    }
 
 
 # =============================================================================

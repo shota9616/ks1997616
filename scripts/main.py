@@ -58,8 +58,8 @@ class Config:
 
     # 財務推計
     DEPRECIATION_YEARS = 5
-    GROWTH_RATE = 1.03  # 付加価値額の年間成長率
-    SALARY_GROWTH_RATE = 1.015  # 給与支給総額の年間成長率
+    GROWTH_RATE = 1.05  # 付加価値額の年間成長率（公募要領: 年率4%以上、余裕持ち5%）
+    SALARY_GROWTH_RATE = 1.025  # 給与支給総額の年間成長率（公募要領: 年率2%以上、余裕持ち2.5%）
     PROFIT_GROWTH_RATE = 1.05  # 営業利益の年間成長率
     LABOR_COST_RATIO = 0.35  # 売上高に対する人件費比率
     SALARY_RATIO = 0.3  # 売上高に対する給与比率
@@ -344,8 +344,8 @@ def read_hearing_sheet(file_path: str) -> HearingData:
         ws = find_sheet(["省力化効果", "4_"])
         if ws:
             data.labor_saving.target_tasks = str(find_value(ws, ["対象となる作業"]))
-            data.labor_saving.current_hours = find_float(ws, ["導入前"])
-            data.labor_saving.target_hours = find_float(ws, ["導入後"])
+            data.labor_saving.current_hours = find_float(ws, ["導入前", "1日に何時間", "何時間その作業", "現在の作業時間", "今かかっている"])
+            data.labor_saving.target_hours = find_float(ws, ["導入後", "導入したら何時間", "目標時間", "何時間になりそう", "短縮後"])
             if data.labor_saving.current_hours > 0:
                 # Phase 1: マイナス削減率防止
                 data.labor_saving.reduction_hours = max(0, data.labor_saving.current_hours - data.labor_saving.target_hours)
@@ -482,6 +482,23 @@ def read_hearing_sheet(file_path: str) -> HearingData:
         if wb is not None:
             wb.close()
 
+    # フォールバック計算（0値の補完）
+    if data.labor_saving.current_hours == 0 and data.before_processes:
+        data.labor_saving.current_hours = sum(p.time_minutes for p in data.before_processes) / 60
+        print(f"  ⚠️ current_hours=0 → before_processesから推計: {data.labor_saving.current_hours:.1f}h")
+    if data.labor_saving.target_hours == 0 and data.after_processes:
+        data.labor_saving.target_hours = sum(p.time_minutes for p in data.after_processes) / 60
+        print(f"  ⚠️ target_hours=0 → after_processesから推計: {data.labor_saving.target_hours:.1f}h")
+    if data.labor_saving.current_hours > 0 and data.labor_saving.target_hours > 0:
+        data.labor_saving.reduction_hours = max(0, data.labor_saving.current_hours - data.labor_saving.target_hours)
+        data.labor_saving.reduction_rate = max(0, (data.labor_saving.reduction_hours / data.labor_saving.current_hours) * 100)
+    if data.funding.subsidy_amount == 0 and data.funding.total_investment > 0:
+        data.funding.subsidy_amount = int(data.funding.total_investment * 0.5)
+        print(f"  ⚠️ subsidy_amount=0 → total_investment×0.5で推計: {data.funding.subsidy_amount:,}円")
+    if data.funding.self_funding == 0 and data.funding.total_investment > 0:
+        data.funding.self_funding = data.funding.total_investment - data.funding.subsidy_amount
+        print(f"  ⚠️ self_funding=0 → 差額で推計: {data.funding.self_funding:,}円")
+
     # 読み込み結果表示
     print(f"  ✅ 企業名: {data.company.name}")
     print(f"  ✅ 業種: {data.company.industry}")
@@ -493,6 +510,26 @@ def read_hearing_sheet(file_path: str) -> HearingData:
     print(f"  ✅ 売上高(2024): {data.company.revenue_2024:,}円")
 
     return data
+
+
+def validate_hearing_data(data: HearingData) -> List[str]:
+    """ヒアリングデータの必須フィールドを検証し、問題リストを返す"""
+    issues = []
+    if data.labor_saving.current_hours <= 0:
+        issues.append("導入前の作業時間(current_hours)が0です")
+    if data.labor_saving.target_hours <= 0:
+        issues.append("導入後の作業時間(target_hours)が0です")
+    if data.funding.subsidy_amount <= 0:
+        issues.append("補助金申請額(subsidy_amount)が0です")
+    if data.funding.total_investment <= 0:
+        issues.append("投資総額(total_investment)が0です")
+    if data.equipment.total_price <= 0:
+        issues.append("設備価格(total_price)が0です")
+    if not data.company.name or data.company.name.strip() == "":
+        issues.append("企業名が空です")
+    if data.company.employee_count <= 0:
+        issues.append("従業員数(employee_count)が0です")
+    return issues
 
 
 def generate_processes(data: HearingData) -> Tuple[List[WorkProcess], List[WorkProcess]]:
@@ -675,7 +712,7 @@ class ContentGenerator:
 
     def generate_section_1_1(self) -> str:
         """1-1 現状分析（PREP法、600字以上）"""
-        added_value_2024 = self.c.operating_profit_2024 + int(self.c.revenue_2024 * Config.LABOR_COST_RATIO)
+        added_value_2024 = self.c.operating_profit_2024 + int(self.c.revenue_2024 * Config.LABOR_COST_RATIO) + self.c.depreciation
 
         return f"""当社{self.c.name}は、{self.c.established_date}の設立以来、{self.c.prefecture}を拠点として{self.c.industry}を営む企業である。主たる事業内容は{self.c.business_description}であり、現在、役員{self.c.officer_count}名、従業員{self.c.employee_count}名の体制で事業を運営している。
 
@@ -808,7 +845,7 @@ class ContentGenerator:
     def generate_section_3_1(self) -> str:
         """3-1 生産性向上（PREP法、700字以上）"""
         # Phase 2: Config参照
-        base_added_value = self.c.operating_profit_2024 + int(self.c.revenue_2024 * Config.LABOR_COST_RATIO)
+        base_added_value = self.c.operating_profit_2024 + int(self.c.revenue_2024 * Config.LABOR_COST_RATIO) + self.c.depreciation
         growth = Config.GROWTH_RATE
 
         # Phase 4: 賃上げ計画データの反映
@@ -822,21 +859,24 @@ class ContentGenerator:
             else:
                 wage_detail += "次年度より実施予定である。"
 
-        return f"""本事業の実施により、当社は付加価値額の年率3%以上の向上を目指す。
+        growth_pct = (Config.GROWTH_RATE - 1) * 100
+        salary_growth_pct = (Config.SALARY_GROWTH_RATE - 1) * 100
+
+        return f"""本事業の実施により、当社は付加価値額の年率{growth_pct:.0f}%以上の向上を目指す。
 
 【付加価値額の向上計画】
-当社の付加価値額（営業利益＋人件費＋減価償却費）は、直近の2024年度実績で約{base_added_value:,}円である。本事業により省力化を実現し、業務効率を向上させることで、より多くの案件に対応可能となる。これにより、売上高の拡大を図りながら、付加価値額を毎年3%以上成長させていく計画である。
+当社の付加価値額（営業利益＋人件費＋減価償却費）は、直近の2024年度実績で約{base_added_value:,}円である。本事業により省力化を実現し、業務効率を向上させることで、より多くの案件に対応可能となる。これにより、売上高の拡大を図りながら、付加価値額を毎年{growth_pct:.0f}%以上成長させていく計画である。
 
 5年間の付加価値額推移の計画は以下のとおりである。
 基準年度：約{base_added_value:,}円
-1年目：約{int(base_added_value * growth):,}円（前年比+3.0%）
-2年目：約{int(base_added_value * growth ** 2):,}円（前年比+3.0%）
-3年目：約{int(base_added_value * growth ** 3):,}円（前年比+3.0%）
-4年目：約{int(base_added_value * growth ** 4):,}円（前年比+3.0%）
-5年目：約{int(base_added_value * growth ** 5):,}円（前年比+3.0%）
+1年目：約{int(base_added_value * growth):,}円（前年比+{growth_pct:.1f}%）
+2年目：約{int(base_added_value * growth ** 2):,}円（前年比+{growth_pct:.1f}%）
+3年目：約{int(base_added_value * growth ** 3):,}円（前年比+{growth_pct:.1f}%）
+4年目：約{int(base_added_value * growth ** 4):,}円（前年比+{growth_pct:.1f}%）
+5年目：約{int(base_added_value * growth ** 5):,}円（前年比+{growth_pct:.1f}%）
 
 【給与支給総額の向上計画】
-生産性向上により創出した利益の一部を原資として、従業員への還元を行う。具体的には、1人当たり給与支給総額の年平均成長率1.5%以上を達成する計画である。{wage_detail}
+生産性向上により創出した利益の一部を原資として、従業員への還元を行う。具体的には、1人当たり給与支給総額の年平均成長率{salary_growth_pct:.1f}%以上を達成する計画である。{wage_detail}
 
 【事業場内最低賃金の引上げ】
 当社は、事業場内最低賃金について、{self.c.prefecture}の地域別最低賃金を30円以上上回る水準を維持することを表明する。
@@ -881,7 +921,7 @@ def generate_diagrams(data: HearingData, output_dir: str) -> Dict[str, str]:
         ("13_工程別比較", f"工程別の省力化効果比較チャート（横棒グラフ：各工程の導入前vs導入後の所要時間を色分けで並べる）\n設備名:{e.name}\n\n" + "\n".join([f"{bp.name}: 導入前{bp.time_minutes}分→導入後{ap.time_minutes}分（{bp.time_minutes-ap.time_minutes}分削減）" for bp, ap in zip(data.before_processes, data.after_processes)]) + f"\n\n全体削減率: {l.reduction_rate:.0f}%"),
         ("08_実施体制", f"実施体制図\n代表者:{c.representative}\n責任者:{f.implementation_manager}\n従業員:{c.employee_count}名"),
         ("09_スケジュール", f"実施スケジュール\n1ヶ月目:契約発注\n2ヶ月目:納品設置\n3ヶ月目:試運転\n4ヶ月目:本格稼働"),
-        ("10_5年計画", f"5年計画グラフ\n付加価値額:年率+3%成長\n給与支給総額:年率+1.5%成長\n投資回収:約2-3年"),
+        ("10_5年計画", f"5年計画グラフ\n付加価値額:年率+{(Config.GROWTH_RATE-1)*100:.0f}%成長\n給与支給総額:年率+{(Config.SALARY_GROWTH_RATE-1)*100:.1f}%成長\n投資回収:約2-3年"),
         ("11_実施工程", f"""補助事業のスケジュール表（ガントチャート形式）を作成してください。
 
 【表の構成】
@@ -1060,7 +1100,7 @@ def generate_business_plan_1_2(data: HearingData, diagrams: Dict[str, str], outp
             8: gen.generate_section_3_1(),
             9: f"【資金調達計画】\n事業費総額：{f.total_investment:,}円\nうち補助金：{f.subsidy_amount:,}円\nうち自己資金：{f.self_funding:,}円\n\n自己資金については、当社の内部留保および取引銀行である{f.bank_name}からの借入により調達する予定である。\n\n【投資回収計画】\n本設備への投資は、省力化による人件費削減効果と売上拡大による利益増加により、約2〜3年での回収を見込んでいる。",
             10: f"【実施体制】\n統括責任者：{c.representative}（代表取締役）\n実施責任者：{f.implementation_manager}\n従業員{c.employee_count}名と連携して実施\n\n【スケジュール】\n実施期間：{f.implementation_period}\n\n1ヶ月目：契約・発注\n2ヶ月目：設備納品・設置工事\n3ヶ月目：試運転・調整・従業員教育\n4ヶ月目以降：本格稼働・効果測定",
-            11: f"【人手不足の状況】\n当社は「限られた人手で業務を遂行するため、直近の従業員の平均残業時間が30時間を超えている」状況に該当する。直近12ヶ月の平均残業時間：月{s.overtime_hours}時間\n\n【オーダーメイド性】\n本設備は当社の業務に特化したカスタマイズを施す。{e.features}\n\n【賃上げ計画の表明】\n・1人当たり給与支給総額の年平均成長率：1.5%以上\n・事業場内最低賃金：{c.prefecture}の地域別最低賃金を30円以上上回る水準"
+            11: f"【人手不足の状況】\n当社は「限られた人手で業務を遂行するため、直近の従業員の平均残業時間が30時間を超えている」状況に該当する。直近12ヶ月の平均残業時間：月{s.overtime_hours}時間\n\n【オーダーメイド性】\n本設備は当社の業務に特化したカスタマイズを施す。{e.features}\n\n【賃上げ計画の表明】\n・1人当たり給与支給総額の年平均成長率：{(Config.SALARY_GROWTH_RATE - 1) * 100:.1f}%以上\n・事業場内最低賃金：{c.prefecture}の地域別最低賃金を30円以上上回る水準"
         }
 
         for row_idx, content in sections.items():
@@ -1381,7 +1421,7 @@ def generate_business_plan_3(data: HearingData, output_dir: str, template_path: 
                 ws_ref[f'{col}{row_officers}'] = c.officer_count
                 # 従業員数
                 ws_ref[f'{col}{row_employees}'] = c.employee_count
-                # 給与支給総額（年率1.5%以上成長）
+                # 給与支給総額（年率2.5%成長）
                 ws_ref[f'{col}{row_salary_total}'] = int(base_salary * salary_growth)
                 # 給与対象従業員数
                 ws_ref[f'{col}{row_salary_employees}'] = c.employee_count
@@ -1570,7 +1610,7 @@ def generate_other_documents(data: HearingData, output_dir: str, template_dir: P
             if "直近決算" in sname and "記入例" not in sname and "未満" not in sname:
                 ws = wb[sname]
                 safe_write(ws, 'C5', c.name)
-                base_salary = int(c.revenue_2024 * 0.3)
+                base_salary = c.total_salary if c.total_salary > 0 else int(c.revenue_2024 * Config.SALARY_RATIO)
                 safe_write(ws, 'E10', base_salary)
                 safe_write(ws, 'E11', c.employee_count)
                 break
@@ -1638,6 +1678,368 @@ def generate_other_documents(data: HearingData, output_dir: str, template_dir: P
 
 
 # =============================================================================
+# 書類生成（1回分）
+# =============================================================================
+
+def _run_generation(data: HearingData, output_dir: str, template_dir, diagrams: dict):
+    """書類一式を生成する（1回分の実行）"""
+    template_dir = Path(template_dir)
+    Path(output_dir).mkdir(exist_ok=True, parents=True)
+
+    t = template_dir / "事業計画書_その1その2_様式.docx"
+    if t.exists():
+        generate_business_plan_1_2(data, diagrams, str(output_dir), t)
+
+    t = template_dir / "事業計画書_その3_様式.xlsx"
+    if t.exists():
+        generate_business_plan_3(data, str(output_dir), t)
+
+    generate_other_documents(data, str(output_dir), template_dir)
+
+
+def _apply_fixes(issues: list, data: HearingData) -> list:
+    """スコアリング結果のissuesを解析し、パラメータを自動修正する。
+    適用した修正のリストを返す。"""
+    fixes_applied = []
+
+    for issue in issues:
+        action = issue.get("action", "")
+
+        if action == "increase_growth_rate":
+            old = Config.GROWTH_RATE
+            Config.GROWTH_RATE = min(Config.GROWTH_RATE + 0.005, 1.10)  # 上限10%
+            if Config.GROWTH_RATE != old:
+                fixes_applied.append(f"GROWTH_RATE: {old} -> {Config.GROWTH_RATE}")
+
+        elif action == "increase_salary_rate":
+            old = Config.SALARY_GROWTH_RATE
+            Config.SALARY_GROWTH_RATE = min(Config.SALARY_GROWTH_RATE + 0.005, 1.05)  # 上限5%
+            if Config.SALARY_GROWTH_RATE != old:
+                fixes_applied.append(f"SALARY_GROWTH_RATE: {old} -> {Config.SALARY_GROWTH_RATE}")
+
+        elif action == "increase_text" or action == "increase_section_text":
+            # テキスト不足はテンプレートで対応済みのため、再生成で解決を試みる
+            if "テキスト再生成" not in [f.split(":")[0] for f in fixes_applied]:
+                fixes_applied.append("テキスト再生成: リトライ")
+
+    return fixes_applied
+
+
+def _extract_docx_text(output_dir: str) -> str:
+    """事業計画書docxから全テキストを抽出する"""
+    docx_path = Path(output_dir) / "事業計画書_その1その2_完成版.docx"
+    if not docx_path.exists():
+        return ""
+    doc = Document(str(docx_path))
+    texts = []
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    t = para.text.strip()
+                    if t:
+                        texts.append(t)
+    for para in doc.paragraphs:
+        t = para.text.strip()
+        if t:
+            texts.append(t)
+    return "\n\n".join(texts)
+
+
+def _write_text_to_docx(output_dir: str, rewritten_text: str):
+    """リライト済みテキストを事業計画書docxのテーブルセルに書き戻す"""
+    docx_path = Path(output_dir) / "事業計画書_その1その2_完成版.docx"
+    if not docx_path.exists():
+        return
+
+    doc = Document(str(docx_path))
+
+    # セクション番号→リライト済みテキストのマッピングを構築
+    # リライト済みテキストをセクションヘッダーで分割
+    import re
+    section_map = {}
+    current_key = None
+    current_lines = []
+
+    for line in rewritten_text.split("\n"):
+        # セクションヘッダー検出（【...】パターン）
+        header_match = re.match(r"^【(.+?)】", line.strip())
+        if header_match:
+            if current_key and current_lines:
+                section_map[current_key] = "\n".join(current_lines).strip()
+            current_key = header_match.group(1)
+            current_lines = [line]
+        elif current_key:
+            current_lines.append(line)
+
+    if current_key and current_lines:
+        section_map[current_key] = "\n".join(current_lines).strip()
+
+    if not section_map:
+        # セクション分割できない場合、全体を最大のテーブルセルに書き込む
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if len(cell.text) > 500:
+                        cell.text = rewritten_text
+                        doc.save(str(docx_path))
+                        return
+        return
+
+    # テーブルセルをスキャンし、対応するセクションのテキストを置換
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                cell_text = cell.text.strip()
+                for key, new_text in section_map.items():
+                    if key in cell_text and len(cell_text) > 200:
+                        cell.text = new_text
+                        break
+
+    doc.save(str(docx_path))
+
+
+def _run_deai_phase(
+    output_dir: str,
+    industry: str,
+    target_ai_score: int = 85,
+    max_rounds: int = 3,
+    on_progress=None,
+) -> dict:
+    """AI臭除去フェーズ: docxテキスト抽出→スコアリング→リライト→書き戻し
+
+    Returns:
+        dict: {ai_score, ai_rounds, ai_history, skipped}
+    """
+    # ai_smell_score をインポート
+    skill_scripts = Path.home() / ".claude" / "skills" / "shoryokuka-review-deai" / "scripts"
+    if not skill_scripts.exists():
+        print("  AI臭除去スキルが未インストール。スキップします。")
+        return {"ai_score": None, "ai_rounds": 0, "ai_history": [], "skipped": True}
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ai_smell_score", str(skill_scripts / "ai_smell_score.py"))
+    ai_smell = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ai_smell)
+
+    # テキスト抽出
+    text = _extract_docx_text(output_dir)
+    if not text or len(text) < 100:
+        print("  事業計画書テキストが短すぎます。AI臭除去をスキップ。")
+        return {"ai_score": None, "ai_rounds": 0, "ai_history": [], "skipped": True}
+
+    # 初回スコアリング
+    result = ai_smell.calculate_score(text)
+    ai_score = result["total_score"]
+    ai_history = [{"round": 0, "score": ai_score, "grade": result["grade"]}]
+    print(f"\n  AI臭スコア（初回）: {ai_score}/100 ({result['grade']})")
+
+    if on_progress:
+        on_progress("ai_smell_initial", ai_score, result)
+
+    if ai_score >= target_ai_score:
+        print(f"  AI臭スコア {ai_score} >= {target_ai_score}。リライト不要。")
+        return {"ai_score": ai_score, "ai_rounds": 0, "ai_history": ai_history, "skipped": False}
+
+    # auto_rewrite のコア関数をインポート
+    spec2 = importlib.util.spec_from_file_location("auto_rewrite", str(skill_scripts / "auto_rewrite.py"))
+    auto_rw = importlib.util.module_from_spec(spec2)
+    spec2.loader.exec_module(auto_rw)
+
+    # ANTHROPIC_API_KEY チェック
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("  ANTHROPIC_API_KEY 未設定。AI臭除去のリライトをスキップ。")
+        return {"ai_score": ai_score, "ai_rounds": 0, "ai_history": ai_history, "skipped": True}
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+    except ImportError:
+        print("  anthropic パッケージ未インストール。AI臭除去のリライトをスキップ。")
+        return {"ai_score": ai_score, "ai_rounds": 0, "ai_history": ai_history, "skipped": True}
+
+    # 参照ファイル読み込み
+    skill_root = skill_scripts.parent
+    system_prompt = ""
+    rewrite_prompt_path = skill_root / "prompts" / "rewrite_system.txt"
+    if rewrite_prompt_path.exists():
+        system_prompt = rewrite_prompt_path.read_text(encoding="utf-8")
+
+    patterns_path = skill_root / "reference" / "ai_smell_patterns.md"
+    patterns_text = patterns_path.read_text(encoding="utf-8") if patterns_path.exists() else ""
+
+    good_examples_path = skill_root / "reference" / "good_examples.md"
+    good_examples_text = good_examples_path.read_text(encoding="utf-8") if good_examples_path.exists() else ""
+
+    vocab_path = skill_root / "reference" / "industry_vocab.json"
+    import json
+    vocab_data = json.loads(vocab_path.read_text(encoding="utf-8")) if vocab_path.exists() else {}
+
+    full_system = f"{system_prompt}\n\n---\n\n## 参照: AI臭パターン辞典\n\n{patterns_text}\n\n---\n\n## 参照: 採択済み申請書の文体サンプル\n\n{good_examples_text}"
+
+    # リライトループ
+    current_text = text
+    for round_num in range(1, max_rounds + 1):
+        print(f"\n  AI臭除去 ラウンド {round_num}/{max_rounds}...")
+
+        weak_areas = auto_rw.identify_weak_areas(result)
+        instruction = auto_rw.build_rewrite_instruction(
+            weak_areas, industry, round_num, vocab_data, None,
+        )
+
+        try:
+            rewritten = auto_rw.rewrite_with_claude(
+                client, current_text, full_system, instruction,
+                auto_rw.DEFAULT_MODEL,
+            )
+        except Exception as e:
+            print(f"  リライトAPI失敗: {e}")
+            break
+
+        result = ai_smell.calculate_score(rewritten)
+        ai_score = result["total_score"]
+        ai_history.append({"round": round_num, "score": ai_score, "grade": result["grade"]})
+        print(f"  AI臭スコア（ラウンド{round_num}）: {ai_score}/100 ({result['grade']})")
+
+        if on_progress:
+            on_progress(f"ai_smell_round_{round_num}", ai_score, result)
+
+        current_text = rewritten
+
+        if ai_score >= target_ai_score:
+            print(f"  AI臭スコア目標達成！ {ai_score} >= {target_ai_score}")
+            break
+
+        # スコアが改善しなかったら終了
+        if round_num >= 2 and ai_history[-1]["score"] <= ai_history[-2]["score"]:
+            print(f"  スコア改善なし。ループ終了。")
+            break
+
+    # リライト結果をdocxに書き戻し
+    if len(ai_history) > 1:
+        print(f"  リライト結果をdocxに書き戻し中...")
+        _write_text_to_docx(output_dir, current_text)
+        # リライト済みテキストも保存
+        rewrite_path = Path(output_dir) / "事業計画書_リライト済み.txt"
+        rewrite_path.write_text(current_text, encoding="utf-8")
+        print(f"  保存: {rewrite_path}")
+
+    return {"ai_score": ai_score, "ai_rounds": len(ai_history) - 1, "ai_history": ai_history, "skipped": False}
+
+
+def generate_with_auto_fix(
+    data: HearingData,
+    output_dir: str,
+    template_dir,
+    diagrams: dict = None,
+    target_score: int = 85,
+    max_iterations: int = 5,
+    skip_diagrams: bool = False,
+    deai: bool = True,
+    target_ai_score: int = 85,
+    max_ai_rounds: int = 3,
+    on_progress=None,
+) -> dict:
+    """スコアが目標に達するまで生成→検証→修正を繰り返し、
+    品質スコア達成後にAI臭除去フェーズを実行する。
+
+    Args:
+        data: ヒアリングデータ
+        output_dir: 出力ディレクトリ
+        template_dir: テンプレートディレクトリ
+        diagrams: 図解辞書（None=スキップ）
+        target_score: 品質目標スコア（デフォルト85）
+        max_iterations: 品質ループ最大リトライ回数（デフォルト5）
+        skip_diagrams: 図解を採点から除外するか
+        deai: AI臭除去フェーズを実行するか（デフォルトTrue）
+        target_ai_score: AI臭スコア目標（デフォルト85）
+        max_ai_rounds: AI臭除去の最大リライト回数（デフォルト3）
+        on_progress: コールバック fn(phase, score, detail) — UIへの進捗通知用
+
+    Returns:
+        dict: {score, iterations, history, result, ai_result}
+    """
+    from validate import calculate_score
+
+    if diagrams is None:
+        diagrams = {}
+
+    history = []
+
+    # === Phase 1: 書類品質ループ ===
+    for iteration in range(1, max_iterations + 1):
+        # --- 生成 ---
+        _run_generation(data, output_dir, template_dir, diagrams)
+
+        # --- スコアリング ---
+        result = calculate_score(Path(output_dir), skip_diagrams=skip_diagrams)
+        current_score = result["score"]
+        history.append({
+            "iteration": iteration,
+            "score": current_score,
+            "breakdown": result["breakdown"],
+            "issues": [i["detail"] for i in result["issues"]],
+        })
+
+        if on_progress:
+            on_progress(iteration, current_score, history[-1])
+
+        print(f"\n{'='*50}")
+        print(f"  イテレーション {iteration}/{max_iterations}: 品質スコア {current_score}/100")
+        for cat, info in result["breakdown"].items():
+            print(f"    {cat}: {info['score']}/{info['max']}")
+
+        # --- 目標達成チェック ---
+        if current_score >= target_score:
+            print(f"  品質スコア {target_score} を達成！")
+            break
+
+        # --- 最終イテレーションなら終了 ---
+        if iteration >= max_iterations:
+            print(f"  最大イテレーション {max_iterations} に到達。最終スコア: {current_score}")
+            break
+
+        # --- 自動修正 ---
+        fixes = _apply_fixes(result["issues"], data)
+        if not fixes:
+            print(f"  追加の自動修正なし。最終スコア: {current_score}")
+            break
+
+        print(f"  自動修正を適用:")
+        for fix in fixes:
+            print(f"    - {fix}")
+
+        # 出力ディレクトリをクリーンアップして再生成
+        out_path = Path(output_dir)
+        for f in out_path.glob("*_完成版.*"):
+            f.unlink()
+
+    # === Phase 2: AI臭除去 ===
+    ai_result = {"ai_score": None, "ai_rounds": 0, "ai_history": [], "skipped": True}
+    if deai:
+        industry = data.company.industry or "サービス"
+        print(f"\n{'='*50}")
+        print(f"  Phase 2: AI臭除去（業種: {industry}）")
+        ai_result = _run_deai_phase(
+            output_dir=output_dir,
+            industry=industry,
+            target_ai_score=target_ai_score,
+            max_rounds=max_ai_rounds,
+            on_progress=on_progress,
+        )
+
+    final = calculate_score(Path(output_dir), skip_diagrams=skip_diagrams)
+    return {
+        "score": final["score"],
+        "iterations": len(history),
+        "history": history,
+        "result": final,
+        "ai_result": ai_result,
+    }
+
+
+# =============================================================================
 # メイン処理
 # =============================================================================
 
@@ -1649,6 +2051,12 @@ def main():
     parser.add_argument("--output", "-o", default="./output", help="出力ディレクトリ")
     parser.add_argument("--template-dir", "-t", required=True, help="テンプレートディレクトリ")
     parser.add_argument("--no-diagrams", action="store_true", help="図解生成をスキップ")
+    parser.add_argument("--auto-fix", action="store_true", help="85点以上になるまで自動修正ループ")
+    parser.add_argument("--target-score", type=int, default=85, help="自動修正の目標スコア（デフォルト85）")
+    parser.add_argument("--max-iterations", type=int, default=5, help="自動修正の最大リトライ回数（デフォルト5）")
+    parser.add_argument("--no-deai", action="store_true", help="AI臭除去フェーズをスキップ")
+    parser.add_argument("--target-ai-score", type=int, default=85, help="AI臭除去の目標スコア（デフォルト85）")
+    parser.add_argument("--max-ai-rounds", type=int, default=3, help="AI臭除去の最大リライト回数（デフォルト3）")
     args = parser.parse_args()
 
     print("=" * 70)
@@ -1668,23 +2076,43 @@ def main():
     # 2. 図解生成
     diagrams = {} if args.no_diagrams else generate_diagrams(data, str(output_dir))
 
-    # 3. 事業計画書その1その2
-    t = template_dir / "事業計画書_その1その2_様式.docx"
-    if t.exists():
-        generate_business_plan_1_2(data, diagrams, str(output_dir), t)
-
-    # 4. 事業計画書その3
-    t = template_dir / "事業計画書_その3_様式.xlsx"
-    if t.exists():
-        generate_business_plan_3(data, str(output_dir), t)
-
-    # 5. その他
-    generate_other_documents(data, str(output_dir), template_dir)
-
-    print("\n" + "=" * 70)
-    print("✅ 全ての書類生成が完了しました！")
-    print(f"📁 出力先: {output_dir}")
-    print("=" * 70)
+    if args.auto_fix:
+        # 自動修正ループ
+        deai_enabled = not args.no_deai
+        print(f"\n🔄 自動修正モード: 品質目標 {args.target_score}点 / 最大 {args.max_iterations}回")
+        if deai_enabled:
+            print(f"   AI臭除去: 目標 {args.target_ai_score}点 / 最大 {args.max_ai_rounds}回")
+        result = generate_with_auto_fix(
+            data=data,
+            output_dir=str(output_dir),
+            template_dir=template_dir,
+            diagrams=diagrams,
+            target_score=args.target_score,
+            max_iterations=args.max_iterations,
+            skip_diagrams=args.no_diagrams,
+            deai=deai_enabled,
+            target_ai_score=args.target_ai_score,
+            max_ai_rounds=args.max_ai_rounds,
+        )
+        print("\n" + "=" * 70)
+        print(f"品質スコア: {result['score']}/100 （{result['iterations']}回で完了）")
+        for h in result["history"]:
+            status = "PASS" if h["score"] >= args.target_score else "----"
+            print(f"  [{status}] #{h['iteration']}: {h['score']}点")
+        ai_r = result.get("ai_result", {})
+        if ai_r and not ai_r.get("skipped"):
+            print(f"AI臭スコア: {ai_r['ai_score']}/100 （{ai_r['ai_rounds']}回リライト）")
+            for ah in ai_r.get("ai_history", []):
+                print(f"  ラウンド{ah['round']}: {ah['score']}点 ({ah['grade']})")
+        print(f"📁 出力先: {output_dir}")
+        print("=" * 70)
+    else:
+        # 通常の1回生成
+        _run_generation(data, str(output_dir), template_dir, diagrams)
+        print("\n" + "=" * 70)
+        print("✅ 全ての書類生成が完了しました！")
+        print(f"📁 出力先: {output_dir}")
+        print("=" * 70)
 
 
 if __name__ == "__main__":
