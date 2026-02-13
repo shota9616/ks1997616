@@ -2047,7 +2047,8 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="省力化補助金申請書類生成 v10.5 完全版")
-    parser.add_argument("--hearing", "-H", required=True, help="ヒアリングシートのパス")
+    parser.add_argument("--hearing", "-H", required=False, help="ヒアリングシートのパス")
+    parser.add_argument("--from-transcription", help="議事録テキストからヒアリングシートを自動生成して使用")
     parser.add_argument("--output", "-o", default="./output", help="出力ディレクトリ")
     parser.add_argument("--template-dir", "-t", required=True, help="テンプレートディレクトリ")
     parser.add_argument("--no-diagrams", action="store_true", help="図解生成をスキップ")
@@ -2058,6 +2059,10 @@ def main():
     parser.add_argument("--target-ai-score", type=int, default=85, help="AI臭除去の目標スコア（デフォルト85）")
     parser.add_argument("--max-ai-rounds", type=int, default=3, help="AI臭除去の最大リライト回数（デフォルト3）")
     args = parser.parse_args()
+
+    # --hearing か --from-transcription のいずれかが必須
+    if not args.hearing and not args.from_transcription:
+        parser.error("--hearing または --from-transcription のいずれかを指定してください")
 
     print("=" * 70)
     print("省力化補助金 申請書類生成スクリプト v10.5 完全版")
@@ -2071,7 +2076,25 @@ def main():
     output_dir.mkdir(exist_ok=True, parents=True)
 
     # 1. データ読み込み
-    data = read_hearing_sheet(args.hearing)
+    hearing_path = args.hearing
+    if args.from_transcription:
+        # 議事録テキストから一時Excelを生成
+        import tempfile
+        from transcription_to_hearing import transcription_to_hearing as t2h
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            print("❌ --from-transcription 使用時は ANTHROPIC_API_KEY 環境変数が必要です")
+            sys.exit(1)
+        tmp_hearing = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        tmp_hearing.close()
+        _, _, hearing_path = t2h(
+            input_path=args.from_transcription,
+            output_path=tmp_hearing.name,
+            api_key=api_key,
+        )
+        print(f"  📄 生成されたヒアリングシート: {hearing_path}")
+
+    data = read_hearing_sheet(hearing_path)
 
     # 2. 図解生成
     diagrams = {} if args.no_diagrams else generate_diagrams(data, str(output_dir))
