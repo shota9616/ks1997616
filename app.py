@@ -19,20 +19,10 @@ sys.path.insert(0, str(Path(__file__).parent / "scripts"))
 from main import (
     read_hearing_sheet,
     generate_diagrams,
-    generate_business_plan_1_2,
-    generate_business_plan_3,
-    generate_other_documents,
     generate_with_auto_fix,
     OfficerInfo,
     Config,
     validate_hearing_data,
-)
-from transcription_to_hearing import (
-    extract_from_transcription,
-    validate_extracted_data,
-    build_hearing_data,
-    write_hearing_excel,
-    ANTHROPIC_AVAILABLE,
 )
 from validate import check_files, check_diagrams, check_docx_text, check_plan3_values, calculate_score
 from pdf_extractor import extract_financial_statements, extract_corporate_registry
@@ -52,104 +42,7 @@ st.caption("ヒアリングシート + 決算書 + 登記簿 から申請に必�
 st.divider()
 
 # ---------------------------------------------------------------------------
-# セクション0: 議事録からヒアリングシート自動生成（オプション）
-# ---------------------------------------------------------------------------
-st.subheader("0. 議事録からヒアリングシート自動生成（オプション）")
-st.caption("ミーティングの議事録テキストからヒアリングシートを自動生成できます。")
-
-uploaded_transcript = st.file_uploader(
-    "議事録テキストファイル（.txt）",
-    type=["txt"],
-    help="ミーティングの文字起こしテキスト。Claude APIで構造化データを抽出します。",
-)
-
-# 議事録 → ヒアリングシート生成結果を保持
-generated_hearing_bytes = None
-generated_hearing_data = None
-use_generated_hearing = False
-
-if uploaded_transcript is not None:
-    # ANTHROPIC_API_KEY 取得
-    transcript_api_key = ""
-    env_anthropic = os.environ.get("ANTHROPIC_API_KEY", "")
-    try:
-        secrets_anthropic = st.secrets.get("ANTHROPIC_API_KEY", "")
-    except Exception:
-        secrets_anthropic = ""
-    if secrets_anthropic == "your-anthropic-api-key-here":
-        secrets_anthropic = ""
-
-    if env_anthropic:
-        st.info("環境変数の ANTHROPIC_API_KEY を使用します。")
-        transcript_api_key = env_anthropic
-    elif secrets_anthropic:
-        st.info("Secrets に設定済みの ANTHROPIC_API_KEY を使用します。")
-        transcript_api_key = secrets_anthropic
-    else:
-        transcript_api_key = st.text_input(
-            "ANTHROPIC_API_KEY（議事録読み取り用）",
-            type="password",
-            help="Claude APIキーを入力してください。",
-        )
-
-    if not ANTHROPIC_AVAILABLE:
-        st.error("anthropic パッケージがインストールされていません。pip install anthropic を実行してください。")
-    elif transcript_api_key and st.button("ヒアリングシートを生成", type="secondary"):
-        transcript_text = uploaded_transcript.getvalue().decode("utf-8")
-        with st.status("議事録からデータを抽出中（Claude API×4回）...", expanded=True) as status:
-            try:
-                raw = extract_from_transcription(transcript_text, transcript_api_key)
-                extraction_result = validate_extracted_data(raw)
-
-                # 警告表示
-                for w in extraction_result.warnings:
-                    st.warning(f"抽出警告: {w}")
-
-                hearing_data = build_hearing_data(extraction_result)
-                st.write(f"企業名: **{hearing_data.company.name}**")
-                st.write(f"業種: {hearing_data.company.industry}")
-                st.write(f"設備: {hearing_data.equipment.name}")
-                st.write(f"投資額: {hearing_data.equipment.total_price:,}円")
-
-                # 一時ファイルにExcel書き出し
-                with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
-                    write_hearing_excel(hearing_data, tmp.name)
-                    with open(tmp.name, "rb") as f:
-                        generated_hearing_bytes = f.read()
-                    os.unlink(tmp.name)
-
-                generated_hearing_data = hearing_data
-                st.session_state["generated_hearing_bytes"] = generated_hearing_bytes
-                st.session_state["generated_hearing_data"] = generated_hearing_data
-                status.update(label="ヒアリングシート生成完了", state="complete")
-            except Exception as e:
-                status.update(label="生成エラー", state="error")
-                st.error(f"議事録からの生成に失敗しました: {e}")
-
-    # セッションステートから復元
-    if "generated_hearing_bytes" in st.session_state:
-        generated_hearing_bytes = st.session_state["generated_hearing_bytes"]
-        generated_hearing_data = st.session_state["generated_hearing_data"]
-
-    if generated_hearing_bytes:
-        col_dl, col_use = st.columns(2)
-        with col_dl:
-            company_name = ""
-            if generated_hearing_data:
-                company_name = generated_hearing_data.company.name or "output"
-            st.download_button(
-                label="生成したヒアリングシートをダウンロード",
-                data=generated_hearing_bytes,
-                file_name=f"hearing_{company_name}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        with col_use:
-            use_generated_hearing = st.checkbox("このまま書類生成に進む", value=False)
-
-st.divider()
-
-# ---------------------------------------------------------------------------
-# ファイルアップロード
+# 1. ファイルアップロード
 # ---------------------------------------------------------------------------
 st.subheader("1. ファイルアップロード")
 
@@ -187,7 +80,7 @@ if sample_path.exists():
 st.divider()
 
 # ---------------------------------------------------------------------------
-# オプション設定
+# 2. オプション設定
 # ---------------------------------------------------------------------------
 st.subheader("2. オプション設定")
 
@@ -243,14 +136,14 @@ if uploaded_financial or uploaded_registry:
 st.divider()
 
 # ---------------------------------------------------------------------------
-# 書類生成
+# 3. 書類生成
 # ---------------------------------------------------------------------------
 st.subheader("3. 書類生成")
 
-can_generate = (uploaded is not None) or use_generated_hearing
+can_generate = uploaded is not None
 if st.button("書類を生成する", type="primary", disabled=(not can_generate)):
     if not can_generate:
-        st.warning("ヒアリングシートをアップロードするか、議事録から生成してください。")
+        st.warning("ヒアリングシートをアップロードしてください。")
         st.stop()
 
     template_dir = Path(__file__).parent / "templates"
@@ -266,10 +159,7 @@ if st.button("書類を生成する", type="primary", disabled=(not can_generate
         # 1. アップロードファイルを一時保存
         hearing_path = os.path.join(tmpdir, "hearing.xlsx")
         with open(hearing_path, "wb") as f:
-            if use_generated_hearing and generated_hearing_bytes:
-                f.write(generated_hearing_bytes)
-            else:
-                f.write(uploaded.getvalue())
+            f.write(uploaded.getvalue())
 
         # 2. ヒアリングシート読み込み
         with st.status("ヒアリングシートを読み込み中...", expanded=True) as status:
@@ -291,9 +181,9 @@ if st.button("書類を生成する", type="primary", disabled=(not can_generate
             for issue in data_issues:
                 st.warning(f"データ警告: {issue}")
 
-        # 3. 決算書PDF読み取り（Claude API）
+        # 3. 決算書PDF読み取り（Gemini API）
         if uploaded_financial and pdf_api_key:
-            with st.status("決算書PDFを読み取り中（Claude API）...", expanded=True) as status:
+            with st.status("決算書PDFを読み取り中（Gemini API）...", expanded=True) as status:
                 try:
                     fin_data = extract_financial_statements(
                         uploaded_financial.getvalue(), pdf_api_key
@@ -334,9 +224,9 @@ if st.button("書類を生成する", type="primary", disabled=(not can_generate
         elif uploaded_financial and not pdf_api_key:
             st.warning("GEMINI_API_KEY が未設定のため、決算書PDFの読み取りをスキップします。")
 
-        # 4. 登記簿PDF読み取り（Claude API）
+        # 4. 登記簿PDF読み取り（Gemini API）
         if uploaded_registry and pdf_api_key:
-            with st.status("履歴事項全部証明書を読み取り中（Claude API）...", expanded=True) as status:
+            with st.status("履歴事項全部証明書を読み取り中（Gemini API）...", expanded=True) as status:
                 try:
                     reg_data = extract_corporate_registry(
                         uploaded_registry.getvalue(), pdf_api_key
@@ -364,9 +254,6 @@ if st.button("書類を生成する", type="primary", disabled=(not can_generate
                             data.company.established_date = reg_data["設立年月日"]
                         if reg_data.get("資本金", 0) > 0:
                             data.company.capital = reg_data["資本金"]
-                        # 事業目的: business_description には上書きしない
-                        # （登記簿の目的欄は長文のため、事業計画書の文章が壊れる）
-                        # ヒアリングシートに事業内容が未入力の場合のみ先頭項目を使用
                         if reg_data.get("事業目的") and not data.company.business_description:
                             import re
                             purpose_text = reg_data["事業目的"]
@@ -419,7 +306,7 @@ if st.button("書類を生成する", type="primary", disabled=(not can_generate
         elif use_diagrams and not gemini_api_key:
             st.warning("GEMINI_API_KEY が未設定のため、図解生成をスキップします。")
 
-        # 6. 書類生成（自動修正ループ）
+        # 6. 書類生成（自動修正ループ — スコア85点以上で完了）
         skip_diags = not bool(diagrams)
         target_score = 85
         max_iters = 5
@@ -592,4 +479,4 @@ if st.button("書類を生成する", type="primary", disabled=(not can_generate
         )
 
 elif not can_generate:
-    st.info("ヒアリングシート（.xlsx）をアップロードするか、議事録から自動生成して「書類を生成する」を押してください。")
+    st.info("ヒアリングシート（.xlsx）をアップロードして「書類を生成する」を押してください。")
