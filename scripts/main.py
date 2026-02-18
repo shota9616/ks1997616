@@ -724,7 +724,9 @@ class ContentGenerator:
 
     def generate_section_1_1(self) -> str:
         """1-1 現状分析（PREP法、600字以上）"""
-        added_value_2024 = self.c.operating_profit_2024 + int(self.c.revenue_2024 * Config.LABOR_COST_RATIO) + self.c.depreciation
+        _labor = self.c.labor_cost if self.c.labor_cost > 0 else int(self.c.revenue_2024 * Config.LABOR_COST_RATIO)
+        _dep = self.c.depreciation if self.c.depreciation > 0 else int(self.e.total_price / Config.DEPRECIATION_YEARS)
+        added_value_2024 = self.c.operating_profit_2024 + _labor + _dep
 
         return f"""当社{self.c.name}は、{self.c.established_date}の設立以来、{self.c.prefecture}を拠点として{self.c.industry}を営む企業である。主たる事業内容は{self.c.business_description}であり、現在、役員{self.c.officer_count}名、従業員{self.c.employee_count}名の体制で事業を運営している。
 
@@ -856,8 +858,10 @@ class ContentGenerator:
 
     def generate_section_3_1(self) -> str:
         """3-1 生産性向上（PREP法、700字以上）"""
-        # Phase 2: Config参照
-        base_added_value = self.c.operating_profit_2024 + int(self.c.revenue_2024 * Config.LABOR_COST_RATIO) + self.c.depreciation
+        # Phase 2: Config参照（plan3_writerと同じフォールバック計算で統一）
+        base_labor_cost = self.c.labor_cost if self.c.labor_cost > 0 else int(self.c.revenue_2024 * Config.LABOR_COST_RATIO)
+        base_depreciation = self.c.depreciation if self.c.depreciation > 0 else int(self.e.total_price / Config.DEPRECIATION_YEARS)
+        base_added_value = self.c.operating_profit_2024 + base_labor_cost + base_depreciation
         growth = Config.GROWTH_RATE
 
         # Phase 4: 賃上げ計画データの反映

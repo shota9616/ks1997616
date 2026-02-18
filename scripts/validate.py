@@ -361,7 +361,14 @@ def check_cross_document_consistency(output_dir: Path) -> dict:
             for name in wb.sheetnames:
                 if "参考書式" in name or "目標値" in name:
                     ws = wb[name]
-                    ref_added_value = ws['E26'].value
+                    # 「付加価値額」ラベルを検索して対応するE列の値を取得
+                    # （テンプレートによって行番号が変わるため動的検索）
+                    for row_num in range(20, 50):
+                        label_b = str(ws[f'B{row_num}'].value or "")
+                        label_c = str(ws[f'C{row_num}'].value or "")
+                        if "付加価値額" in label_b or "付加価値額" in label_c:
+                            ref_added_value = ws[f'E{row_num}'].value
+                            break
                     break
             for name in wb.sheetnames:
                 if "指定様式" in name:
