@@ -1779,6 +1779,100 @@ def _fix_text_holes_in_docx(output_dir: str, data: HearingData) -> list:
     return fixes
 
 
+def _fix_consistency_in_docx(output_dir: str, data: HearingData) -> list:
+    """docx内の付加価値額をExcel参考書式と統一する（書類間整合性の自動修正）"""
+    docx_path = Path(output_dir) / "事業計画書_その1その2_完成版.docx"
+    if not docx_path.exists():
+        return []
+
+    c = data.company
+    e = data.equipment
+    # plan3_writerと完全同一の計算式で「正しい付加価値額」を算出
+    base_labor = c.labor_cost if c.labor_cost > 0 else int(c.revenue_2024 * Config.LABOR_COST_RATIO)
+    base_dep = c.depreciation if c.depreciation > 0 else int(e.total_price / Config.DEPRECIATION_YEARS)
+    correct_av = c.operating_profit_2024 + base_labor + base_dep
+
+    doc = Document(str(docx_path))
+    fixes = []
+    av_pattern = re.compile(r"(付加価値額[^0-9]{0,30}?(?:約)?)([0-9,]+)(円)")
+
+    def _replace_in_text(text, old_val_str, new_val_str):
+        """テキスト内の数値文字列を置換"""
+        return text.replace(old_val_str, new_val_str)
+
+    # テーブル内のセルを走査（事業計画書の本文はテーブル内に格納）
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    full_text = para.text
+                    m = av_pattern.search(full_text)
+                    if m:
+                        old_val = int(m.group(2).replace(",", ""))
+                        if old_val != correct_av and old_val > 10000:
+                            diff_ratio = abs(old_val - correct_av) / max(old_val, correct_av, 1)
+                            if diff_ratio > 0.10:  # 10%以上の差異
+                                old_str = f"{old_val:,}"
+                                new_str = f"{correct_av:,}"
+                                # run単位で置換（フォーマット保持）
+                                for run in para.runs:
+                                    if old_str in run.text:
+                                        run.text = run.text.replace(old_str, new_str)
+                                # runで置換できない場合（数字が複数runに分割）はpara全体で置換
+                                if old_str in para.text:
+                                    for run in para.runs:
+                                        if old_str in run.text:
+                                            run.text = run.text.replace(old_str, new_str)
+                                fixes.append(f"付加価値額修正: {old_str}円 → {new_str}円")
+
+    # 5年計画の数値も修正（基準年度: X円, 1年目: Y円 ... のパターン）
+    growth = Config.GROWTH_RATE
+    year_values = {}
+    for yr in range(0, 6):
+        year_values[yr] = int(correct_av * growth ** yr)
+
+    # 数値パターンで年次計画値を置換
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    text = para.text
+                    # 「N年目：約XX,XXX,XXX円」パターン
+                    year_pattern = re.compile(r"(\d)年目[：:]約?([0-9,]+)円")
+                    for ym in year_pattern.finditer(text):
+                        yr_num = int(ym.group(1))
+                        old_yr_val = int(ym.group(2).replace(",", ""))
+                        if yr_num in year_values:
+                            new_yr_val = year_values[yr_num]
+                            if old_yr_val != new_yr_val and abs(old_yr_val - new_yr_val) / max(old_yr_val, 1) > 0.10:
+                                old_yr_str = f"{old_yr_val:,}"
+                                new_yr_str = f"{new_yr_val:,}"
+                                for run in para.runs:
+                                    if old_yr_str in run.text:
+                                        run.text = run.text.replace(old_yr_str, new_yr_str)
+                                if old_yr_str not in [f.split("→")[0] for f in fixes]:
+                                    fixes.append(f"計画値修正({yr_num}年目): {old_yr_str}円 → {new_yr_str}円")
+
+                    # 「基準年度：約XX,XXX,XXX円」パターン
+                    base_pattern = re.compile(r"基準年度[：:]約?([0-9,]+)円")
+                    bm = base_pattern.search(text)
+                    if bm:
+                        old_base = int(bm.group(1).replace(",", ""))
+                        if old_base != correct_av and abs(old_base - correct_av) / max(old_base, 1) > 0.10:
+                            old_b_str = f"{old_base:,}"
+                            new_b_str = f"{correct_av:,}"
+                            for run in para.runs:
+                                if old_b_str in run.text:
+                                    run.text = run.text.replace(old_b_str, new_b_str)
+                            fixes.append(f"基準年度修正: {old_b_str}円 → {new_b_str}円")
+
+    if fixes:
+        doc.save(str(docx_path))
+        print(f"  📝 付加価値額整合性修正 {len(fixes)}件")
+
+    return fixes
+
+
 def _apply_fixes(issues: list, data: HearingData) -> list:
     """スコアリング結果のissuesを解析し、パラメータを自動修正する。
     適用した修正のリストを返す。"""
@@ -2084,6 +2178,12 @@ def generate_with_auto_fix(
             for hf in hole_fixes:
                 print(f"    - {hf}")
 
+        # --- 付加価値額の書類間整合性修正 ---
+        consistency_fixes = _fix_consistency_in_docx(output_dir, data)
+        if consistency_fixes:
+            for cf in consistency_fixes:
+                print(f"    - {cf}")
+
         # --- スコアリング ---
         result = calculate_score(Path(output_dir), skip_diagrams=skip_diagrams)
         current_score = result["score"]
@@ -2107,9 +2207,9 @@ def generate_with_auto_fix(
             print(f"  品質スコア {target_score} を達成！")
             break
 
-        # --- スコア停滞検出 ---
-        if iteration > 1 and current_score == history[-2]["score"]:
-            print(f"  スコア停滞を検出（{current_score}点）。再生成しても改善しないためループ終了。")
+        # --- スコア停滞検出（±1点以内で停滞とみなす）---
+        if iteration > 1 and abs(current_score - history[-2]["score"]) <= 1.0:
+            print(f"  スコア停滞を検出（{current_score}点 ≒ 前回{history[-2]['score']}点）。再生成しても改善しないためループ終了。")
             break
 
         # --- 最終イテレーションなら終了 ---
