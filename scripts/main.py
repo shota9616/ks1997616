@@ -56,11 +56,23 @@ class Config:
     WORKING_DAYS_PER_YEAR = 250
     WORKING_DAYS_PER_MONTH = 22
 
-    # 財務推計
+    # 財務推計（デフォルト値）
     DEPRECIATION_YEARS = 5
     GROWTH_RATE = 1.05  # 付加価値額の年間成長率（公募要領: 年率4%以上、余裕持ち5%）
     SALARY_GROWTH_RATE = 1.025  # 給与支給総額の年間成長率（公募要領: 年率2%以上、余裕持ち2.5%）
     PROFIT_GROWTH_RATE = 1.05  # 営業利益の年間成長率
+
+    # 自動修正ループ用: デフォルト値（リセット用の不変定数）
+    _GROWTH_RATE_DEFAULT = 1.05
+    _SALARY_GROWTH_RATE_DEFAULT = 1.025
+    _PROFIT_GROWTH_RATE_DEFAULT = 1.05
+
+    @classmethod
+    def reset_rates(cls):
+        """自動修正ループ開始前に成長率をデフォルトにリセットする"""
+        cls.GROWTH_RATE = cls._GROWTH_RATE_DEFAULT
+        cls.SALARY_GROWTH_RATE = cls._SALARY_GROWTH_RATE_DEFAULT
+        cls.PROFIT_GROWTH_RATE = cls._PROFIT_GROWTH_RATE_DEFAULT
     LABOR_COST_RATIO = 0.35  # 売上高に対する人件費比率
     SALARY_RATIO = 0.3  # 売上高に対する給与比率
 
@@ -815,7 +827,7 @@ class ContentGenerator:
         text += f"""
 
 【省力化の仕組み】
-{self.e.name}の主要機能として、{self.e.features}が挙げられる。特に「{biggest[0].name}」工程においては、従来{biggest[0].description}に{biggest[0].time_minutes}分を要していたが、本設備の{biggest[1].description}機能により{biggest[1].time_minutes}分まで短縮される。これが本事業における最大の省力化ポイントである。
+{self.e.name}の主要機能として、{self.e.features if self.e.features else f"{self.e.name}による業務自動化・効率化機能"}が挙げられる。特に「{biggest[0].name}」工程においては、従来{biggest[0].description}に{biggest[0].time_minutes}分を要していたが、本設備の{biggest[1].description}機能により{biggest[1].time_minutes}分まで短縮される。これが本事業における最大の省力化ポイントである。
 
 本設備の導入により、従業員は定型的・反復的な作業から解放され、顧客対応や品質管理といった人間の判断力が求められる高付加価値業務に集中できるようになる。1日あたりの削減時間は{self.l.reduction_hours:.1f}時間となり、月間では約{self.l.reduction_hours * Config.WORKING_DAYS_PER_MONTH:.0f}時間の業務時間を創出できる。"""
 
@@ -1697,6 +1709,72 @@ def _run_generation(data: HearingData, output_dir: str, template_dir, diagrams: 
     generate_other_documents(data, str(output_dir), template_dir)
 
 
+def _fix_text_holes_in_docx(output_dir: str, data: HearingData) -> list:
+    """docx内のテキスト穴あき（プレースホルダー空白）を修正する"""
+    docx_path = Path(output_dir) / "事業計画書_その1その2_完成版.docx"
+    if not docx_path.exists():
+        return []
+
+    doc = Document(str(docx_path))
+    fixes = []
+
+    # 修正マッピング: パターン → 置換テキスト生成関数
+    e = data.equipment
+    features = e.features if e.features else f"{e.name}による業務自動化・効率化機能"
+
+    replacements = {
+        "主要機能として、が挙げられる": f"主要機能として、{features}が挙げられる",
+    }
+
+    # 未丸め小数値の修正パターン
+    decimal_pattern = re.compile(r"(\d+)\.(\d{6,})(\s*時間|\s*分)")
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    original = para.text
+                    text = original
+
+                    # 固定パターン置換
+                    for old_text, new_text in replacements.items():
+                        if old_text in text:
+                            text = text.replace(old_text, new_text)
+                            fixes.append(f"穴あき修正: '{old_text}' → '{new_text[:40]}...'")
+
+                    # 未丸め小数値修正
+                    def _round_decimal(m):
+                        whole = m.group(1)
+                        decimal = m.group(2)
+                        unit = m.group(3)
+                        rounded = round(float(f"{whole}.{decimal}"), 1)
+                        return f"{rounded}{unit}"
+                    text = decimal_pattern.sub(_round_decimal, text)
+                    if text != original:
+                        if "小数丸め" not in str(fixes):
+                            fixes.append("小数値丸め: 未整形の小数値を修正")
+
+                    if text != original:
+                        para.text = text
+
+    for para in doc.paragraphs:
+        original = para.text
+        text = original
+        for old_text, new_text in replacements.items():
+            if old_text in text:
+                text = text.replace(old_text, new_text)
+                if f"穴あき修正: '{old_text}'" not in str(fixes):
+                    fixes.append(f"穴あき修正: '{old_text}' → '{new_text[:40]}...'")
+        text = decimal_pattern.sub(_round_decimal, text)
+        if text != original:
+            para.text = text
+
+    if fixes:
+        doc.save(str(docx_path))
+
+    return fixes
+
+
 def _apply_fixes(issues: list, data: HearingData) -> list:
     """スコアリング結果のissuesを解析し、パラメータを自動修正する。
     適用した修正のリストを返す。"""
@@ -1721,6 +1799,23 @@ def _apply_fixes(issues: list, data: HearingData) -> list:
             # テキスト不足はテンプレートで対応済みのため、再生成で解決を試みる
             if "テキスト再生成" not in [f.split(":")[0] for f in fixes_applied]:
                 fixes_applied.append("テキスト再生成: リトライ")
+
+        elif action == "fix_text_holes":
+            # テキスト穴あき修正はdocx直接編集で対応
+            if "テキスト穴あき修正" not in [f.split(":")[0] for f in fixes_applied]:
+                fixes_applied.append("テキスト穴あき修正: docx直接編集")
+
+        elif action == "fix_value_inconsistency":
+            # 書類間整合性は再生成で対応（Config値が統一されていれば解決）
+            if "数値整合性修正" not in [f.split(":")[0] for f in fixes_applied]:
+                fixes_applied.append("数値整合性修正: 再生成で統一")
+
+        elif action == "fix_negative_profit":
+            # 営業利益マイナスは成長率増加で対応
+            old = Config.GROWTH_RATE
+            Config.GROWTH_RATE = min(Config.GROWTH_RATE + 0.01, 1.10)
+            if Config.GROWTH_RATE != old:
+                fixes_applied.append(f"営業利益修正: GROWTH_RATE {old} -> {Config.GROWTH_RATE}")
 
     return fixes_applied
 
@@ -1965,12 +2060,23 @@ def generate_with_auto_fix(
     if diagrams is None:
         diagrams = {}
 
+    # 自動修正ループ開始前に成長率をデフォルト値にリセット
+    # （前回のループで変更された値が残らないようにする）
+    Config.reset_rates()
+
     history = []
 
     # === Phase 1: 書類品質ループ ===
     for iteration in range(1, max_iterations + 1):
         # --- 生成 ---
         _run_generation(data, output_dir, template_dir, diagrams)
+
+        # --- テキスト穴あき修正（生成直後に実施）---
+        hole_fixes = _fix_text_holes_in_docx(output_dir, data)
+        if hole_fixes:
+            print(f"  テキスト穴あき修正 {len(hole_fixes)}件:")
+            for hf in hole_fixes:
+                print(f"    - {hf}")
 
         # --- スコアリング ---
         result = calculate_score(Path(output_dir), skip_diagrams=skip_diagrams)
@@ -2028,6 +2134,9 @@ def generate_with_auto_fix(
             max_rounds=max_ai_rounds,
             on_progress=on_progress,
         )
+
+    # ループ終了後に成長率をデフォルトにリセット（他処理への影響防止）
+    Config.reset_rates()
 
     final = calculate_score(Path(output_dir), skip_diagrams=skip_diagrams)
     return {

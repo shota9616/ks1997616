@@ -383,7 +383,8 @@ if st.button("書類を生成する", type="primary", disabled=(not can_generate
         with st.expander("スコア内訳"):
             for cat, info in breakdown.items():
                 label = {"files": "ファイル", "diagrams": "図解", "text_total": "総文字数",
-                         "sections": "セクション文字数", "values": "数値要件"}.get(cat, cat)
+                         "sections": "セクション文字数", "values": "数値要件",
+                         "text_quality": "テキスト品質", "consistency": "書類間整合性"}.get(cat, cat)
                 bar_pct = info["score"] / info["max"] if info["max"] > 0 else 0
                 st.write(f"{label}: **{info['score']}/{info['max']}** {info.get('detail', '')}")
                 st.progress(min(bar_pct, 1.0))
@@ -405,6 +406,8 @@ if st.button("書類を生成する", type="primary", disabled=(not can_generate
         diagram_results = raw.get("diagrams", {})
         text_results = raw.get("text", {})
         value_results = raw.get("values", {})
+        quality_results = raw.get("text_quality", {})
+        consistency_results = raw.get("consistency", {})
 
         # ファイル存在チェック
         file_ok = sum(1 for r in file_results if r["ok"])
@@ -440,6 +443,28 @@ if st.button("書類を生成する", type="primary", disabled=(not can_generate
                 st.success(f"図解: {d_found}/{d_expected} 枚")
             else:
                 st.warning(f"図解: {d_found}/{d_expected} 枚")
+
+        # テキスト品質チェック
+        if quality_results and "error" not in quality_results:
+            q_issues = quality_results.get("issues", [])
+            if quality_results.get("ok"):
+                st.success(f"テキスト品質: 問題なし")
+            else:
+                st.warning(f"テキスト品質: {len(q_issues)}件の問題")
+                with st.expander("テキスト品質の詳細"):
+                    for qi in q_issues:
+                        st.write(f"  - {qi.get('description', qi.get('type', ''))}")
+
+        # 書類間整合性チェック
+        if consistency_results and "error" not in consistency_results:
+            c_issues = consistency_results.get("issues", [])
+            if consistency_results.get("ok"):
+                st.success("書類間整合性: 問題なし")
+            else:
+                st.warning(f"書類間整合性: {len(c_issues)}件の問題")
+                with st.expander("整合性の詳細"):
+                    for ci in c_issues:
+                        st.write(f"  - {ci.get('description', ci.get('type', ''))}")
 
         # 数値チェック
         if isinstance(value_results, dict) and "error" not in value_results:

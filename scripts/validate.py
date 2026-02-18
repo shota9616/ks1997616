@@ -47,11 +47,11 @@ EXPECTED_FILES = [
 
 SECTION_HEADERS = {
     "1-1": ["現状分析", "事業の現状"],
-    "1-2": ["経営課題", "人手不足"],
-    "1-3": ["動機目的", "動機", "なぜ今"],
-    "2-1": ["ビフォーアフター", "導入前後", "省力化の内容"],
-    "2-2": ["効果", "省力化効果"],
-    "3-1": ["生産性向上", "賃上げ", "事業場内"],
+    "1-2": ["経営課題", "人手不足", "経営上の課題"],
+    "1-3": ["動機目的", "動機", "なぜ今", "省力化補助金活用の動機"],
+    "2-1": ["ビフォーアフター", "導入前後", "省力化の内容", "省力化設備導入による業務プロセス"],
+    "2-2": ["効果", "省力化効果", "省力化投資により期待される効果"],
+    "3-1": ["生産性向上", "賃上げ", "事業場内", "付加価値額の向上"],
 }
 
 MIN_CHAR_COUNTS = {
@@ -66,6 +66,22 @@ MIN_CHAR_COUNTS = {
 MIN_TOTAL_CHARS = 4700
 
 EXPECTED_DIAGRAM_COUNT = 13
+
+# テキスト品質チェック: 穴あき・テンプレ残留パターン
+TEXT_HOLE_PATTERNS = [
+    (r"、が挙げられる", "プレースホルダー空白（features未入力）"),
+    (r"、が期待できる", "プレースホルダー空白"),
+    (r"として、を", "プレースホルダー空白"),
+    (r"具体的には、に", "プレースホルダー空白"),
+    (r"として、が", "プレースホルダー空白"),
+    (r"主要機能として、が", "設備機能が未入力"),
+    (r"\d+\.\d{6,}", "未丸め小数値（例: 4.083333...）"),
+    (r"（仮称）", "仮称の残留"),
+    (r"【.*?】\s*$", "空のセクション見出し"),
+    (r"〇〇|●●|△△|□□|※※", "プレースホルダー記号の残留"),
+    (r"None円|None名|None時間", "None値の残留"),
+    (r"0円.*0円.*0円", "全て0円（財務データ未入力）"),
+]
 
 
 # =============================================================================
@@ -115,16 +131,29 @@ def _strip_whitespace(text: str) -> str:
     return text.replace(" ", "").replace("\u3000", "").replace("\n", "").replace("\t", "")
 
 
+def _normalize_section_number(text: str) -> str:
+    """全角数字・ダッシュを半角に正規化"""
+    table = str.maketrans("０１２３４５６７８９−‐‑‒–—―", "0123456789-------")
+    return text.translate(table)
+
+
 def _identify_section(text: str) -> str:
-    """段落テキストからセクションIDを判定（ヘッダー検出用）"""
+    """段落テキストからセクションIDを判定（ヘッダー検出用）
+    テキストの冒頭にセクション番号が出現するかで判定する。
+    テンプレート注釈内の参照（※1-2経営課題 等）は除外。"""
+    normalized = _normalize_section_number(text)
+    # 冒頭30文字以内にセクション番号があるかチェック（注釈内参照を除外）
+    head = normalized[:30]
     for section_id, keywords in SECTION_HEADERS.items():
-        for kw in keywords:
-            if kw in text:
-                # セクション番号パターンも確認（例: "1-1", "２−１"）
-                if re.search(rf"{section_id}|{section_id.replace('-', '[-−]')}", text):
-                    return section_id
-                # キーワードだけでマッチ（ヘッダー行の場合）
-                if len(_strip_whitespace(text)) < 50:
+        # セクション番号が冒頭付近にある
+        pattern = rf"^[^\w]*{re.escape(section_id)}"
+        if re.search(pattern, head):
+            return section_id
+    # キーワードのみマッチ（短いヘッダー行）
+    if len(_strip_whitespace(text)) < 60:
+        for section_id, keywords in SECTION_HEADERS.items():
+            for kw in keywords:
+                if kw in text:
                     return section_id
     return ""
 
@@ -175,6 +204,10 @@ def check_docx_text(output_dir: Path) -> dict:
             current_section = detected
             if current_section not in section_texts:
                 section_texts[current_section] = ""
+            # ヘッダー行にコンテンツが含まれる場合（テンプレート注釈+本文が同一セル）
+            # ヘッダーキーワード以降のテキストもカウントする
+            if len(_strip_whitespace(text)) > 80:
+                section_texts[current_section] += text
             continue
 
         if current_section and current_section in SECTION_HEADERS:
@@ -198,6 +231,182 @@ def check_docx_text(output_dir: Path) -> dict:
         "min_required": MIN_TOTAL_CHARS,
         "ok": total_chars >= MIN_TOTAL_CHARS,
         "sections": section_chars,
+    }
+
+
+def check_text_quality(output_dir: Path) -> dict:
+    """テキスト品質チェック: 穴あき・テンプレ残留・空セクション検出"""
+    if Document is None:
+        return {"error": "python-docxが未インストール", "issues": [], "score_ratio": 1.0}
+
+    docx_path = output_dir / "事業計画書_その1その2_完成版.docx"
+    if not docx_path.exists():
+        return {"error": "ファイルが存在しない", "issues": [], "score_ratio": 0.0}
+
+    doc = Document(str(docx_path))
+
+    # 全テキスト収集
+    all_texts = []
+    for para in doc.paragraphs:
+        t = para.text.strip()
+        if t:
+            all_texts.append(t)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    t = para.text.strip()
+                    if t:
+                        all_texts.append(t)
+
+    full_text = "\n".join(all_texts)
+    issues = []
+
+    # パターンマッチで穴あき検出
+    for pattern, description in TEXT_HOLE_PATTERNS:
+        matches = re.findall(pattern, full_text)
+        if matches:
+            issues.append({
+                "type": "text_hole",
+                "pattern": pattern,
+                "description": description,
+                "count": len(matches),
+                "examples": matches[:3],
+            })
+
+    # 空セクション検出（見出しの直後にテキストがない）
+    for i, text in enumerate(all_texts):
+        if re.match(r"^[0-9０-９][-.−][0-9０-９]|^【.+】$|^■", text):
+            # 見出しの次のテキストが短すぎるか存在しない
+            next_text = all_texts[i + 1] if i + 1 < len(all_texts) else ""
+            next_stripped = _strip_whitespace(next_text)
+            if len(next_stripped) < 30 or re.match(r"^[0-9０-９][-.−][0-9０-９]|^【.+】$|^■", next_text):
+                issues.append({
+                    "type": "empty_section",
+                    "description": f"空セクション: {text[:30]}",
+                    "header": text[:50],
+                })
+
+    # スコア比率計算（問題がないほど1.0に近い）
+    penalty = len([i for i in issues if i["type"] == "text_hole"]) * 0.1
+    penalty += len([i for i in issues if i["type"] == "empty_section"]) * 0.15
+    score_ratio = max(0.0, 1.0 - penalty)
+
+    return {
+        "issues": issues,
+        "issue_count": len(issues),
+        "score_ratio": round(score_ratio, 2),
+        "ok": len(issues) == 0,
+    }
+
+
+def check_cross_document_consistency(output_dir: Path) -> dict:
+    """3書類間（docx/指定様式/参考書式）の数値整合性チェック"""
+    if openpyxl is None or Document is None:
+        return {"error": "必要パッケージ未インストール", "issues": [], "score_ratio": 1.0}
+
+    issues = []
+
+    # docxから付加価値額を抽出
+    docx_path = output_dir / "事業計画書_その1その2_完成版.docx"
+    docx_added_value = None
+    if docx_path.exists():
+        doc = Document(str(docx_path))
+        for para in doc.paragraphs:
+            m = re.search(r"付加価値額[^0-9]*([0-9,]+)円", para.text.replace("、", ""))
+            if m:
+                docx_added_value = int(m.group(1).replace(",", ""))
+                break
+        if docx_added_value is None:
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        m = re.search(r"付加価値額[^0-9]*([0-9,]+)円", cell.text.replace("、", ""))
+                        if m:
+                            docx_added_value = int(m.group(1).replace(",", ""))
+                            break
+
+    # 参考書式シートから付加価値額を抽出
+    xlsx_path = output_dir / "事業計画書_その3_完成版.xlsx"
+    ref_added_value = None
+    designated_added_value = None
+
+    if xlsx_path.exists():
+        try:
+            wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+            for name in wb.sheetnames:
+                if "参考書式" in name or "目標値" in name:
+                    ws = wb[name]
+                    ref_added_value = ws['E26'].value
+                    break
+            for name in wb.sheetnames:
+                if "指定様式" in name:
+                    ws = wb[name]
+                    # 付加価値額の基準年度値を探索
+                    for row in ws.iter_rows(min_row=1, max_row=60):
+                        for cell in row:
+                            if cell.value and "付加価値額" in str(cell.value):
+                                # 同じ行の数値を取得
+                                for c2 in row:
+                                    if isinstance(c2.value, (int, float)) and c2.value > 0:
+                                        designated_added_value = c2.value
+                                        break
+                    break
+
+            # 参考書式の営業利益チェック（マイナスは致命的）
+            for name in wb.sheetnames:
+                if "参考書式" in name or "目標値" in name:
+                    ws = wb[name]
+                    # 営業利益セル（一般的な位置）
+                    for col_letter in ['E', 'F', 'G', 'H', 'I', 'J', 'K']:
+                        for row_num in [20, 21, 22, 23, 24, 25]:
+                            val = ws[f'{col_letter}{row_num}'].value
+                            if isinstance(val, (int, float)) and val < -1000000:
+                                issues.append({
+                                    "type": "negative_profit",
+                                    "description": f"参考書式の営業利益がマイナス（{col_letter}{row_num}: {val:,.0f}円）",
+                                    "cell": f"{col_letter}{row_num}",
+                                    "value": val,
+                                })
+                    break
+
+            wb.close()
+        except Exception:
+            pass
+
+    # 3書類間の付加価値額の不整合チェック
+    values = {}
+    if docx_added_value is not None:
+        values["docx本文"] = docx_added_value
+    if ref_added_value is not None and isinstance(ref_added_value, (int, float)):
+        values["参考書式"] = int(ref_added_value)
+    if designated_added_value is not None:
+        values["指定様式"] = int(designated_added_value)
+
+    if len(values) >= 2:
+        vals = list(values.values())
+        max_val = max(vals)
+        min_val = min(vals)
+        if max_val > 0 and (max_val - min_val) / max_val > 0.15:  # 15%以上の差異
+            issues.append({
+                "type": "value_inconsistency",
+                "description": f"付加価値額が書類間で不整合: {values}",
+                "values": values,
+            })
+
+    penalty = 0
+    for issue in issues:
+        if issue["type"] == "value_inconsistency":
+            penalty += 0.4
+        elif issue["type"] == "negative_profit":
+            penalty += 0.3
+    score_ratio = max(0.0, 1.0 - penalty)
+
+    return {
+        "issues": issues,
+        "issue_count": len(issues),
+        "score_ratio": round(score_ratio, 2),
+        "ok": len(issues) == 0,
     }
 
 
@@ -265,64 +474,99 @@ def check_plan3_values(output_dir: Path) -> dict:
 # =============================================================================
 
 def calculate_score(output_dir: Path, skip_diagrams: bool = False) -> dict:
-    """出力書類を100点満点でスコアリングし、内訳と改善ヒントを返す"""
+    """出力書類を100点満点でスコアリングし、内訳と改善ヒントを返す。
+
+    配点（審査基準に準拠した重み付け）:
+      - ファイル存在:     10点 （形式要件：全書類生成の前提確認）
+      - 図解:             5点  （補足資料）
+      - テキスト量:       15点 （総5 + セクション別10）
+      - テキスト品質:     25点 （穴あき・テンプレ残留・空セクション検出）★NEW
+      - 数値整合性:       25点 （成長率15 + 書類間整合10）★強化
+      - 数値要件:         20点 （付加価値額成長率 + 給与支給総額成長率）
+    """
     output_dir = Path(output_dir)
     file_results = check_files(output_dir)
     diagram_results = check_diagrams(output_dir)
     text_results = check_docx_text(output_dir)
     value_results = check_plan3_values(output_dir)
+    quality_results = check_text_quality(output_dir)
+    consistency_results = check_cross_document_consistency(output_dir)
 
     score = 0.0
     breakdown = {}
     issues = []
 
-    # --- ファイル存在 (30点) ---
+    # --- ファイル存在 (10点) ---
     file_ok = sum(1 for r in file_results if r["ok"])
     file_total = len(file_results)
-    file_score = (file_ok / file_total) * 30 if file_total > 0 else 0
-    breakdown["files"] = {"score": round(file_score, 1), "max": 30, "detail": f"{file_ok}/{file_total}"}
+    file_score = (file_ok / file_total) * 10 if file_total > 0 else 0
+    breakdown["files"] = {"score": round(file_score, 1), "max": 10, "detail": f"{file_ok}/{file_total}"}
     score += file_score
     if file_ok < file_total:
         missing = [r["file"] for r in file_results if not r["ok"]]
         issues.append({"category": "files", "action": "retry_generation", "detail": f"未生成ファイル: {', '.join(missing)}"})
 
-    # --- 図解 (10点、skip_diagrams時は他カテゴリに再配分) ---
+    # --- 図解 (5点、skip_diagrams時は満点扱い) ---
     if skip_diagrams:
-        diagram_score = 10.0  # 満点扱い
+        diagram_score = 5.0
     else:
         d_found = diagram_results.get("found", 0)
         d_expected = diagram_results.get("expected", EXPECTED_DIAGRAM_COUNT)
-        diagram_score = min(d_found / d_expected, 1.0) * 10 if d_expected > 0 else 0
+        diagram_score = min(d_found / d_expected, 1.0) * 5 if d_expected > 0 else 0
         if d_found < d_expected:
             issues.append({"category": "diagrams", "action": "retry_diagrams", "detail": f"図解不足: {d_found}/{d_expected}"})
-    breakdown["diagrams"] = {"score": round(diagram_score, 1), "max": 10, "detail": f"{diagram_results.get('found', 0)}/{diagram_results.get('expected', EXPECTED_DIAGRAM_COUNT)}"}
+    breakdown["diagrams"] = {"score": round(diagram_score, 1), "max": 5, "detail": f"{diagram_results.get('found', 0)}/{diagram_results.get('expected', EXPECTED_DIAGRAM_COUNT)}"}
     score += diagram_score
 
-    # --- 総文字数 (10点) ---
+    # --- 総文字数 (5点) ---
     if "error" not in text_results:
         total_chars = text_results.get("total_chars", 0)
         text_ratio = min(total_chars / MIN_TOTAL_CHARS, 1.0)
-        text_score = text_ratio * 10
+        text_score = text_ratio * 5
         if total_chars < MIN_TOTAL_CHARS:
             issues.append({"category": "text_total", "action": "increase_text", "detail": f"総文字数不足: {total_chars}/{MIN_TOTAL_CHARS}"})
     else:
         text_score = 0
         issues.append({"category": "text_total", "action": "retry_generation", "detail": text_results.get("error", "")})
-    breakdown["text_total"] = {"score": round(text_score, 1), "max": 10, "detail": f"{text_results.get('total_chars', 0)}字"}
+    breakdown["text_total"] = {"score": round(text_score, 1), "max": 5, "detail": f"{text_results.get('total_chars', 0)}字"}
     score += text_score
 
-    # --- セクション別文字数 (30点: 各5点×6) ---
+    # --- セクション別文字数 (10点: 各~1.67点×6) ---
     section_score = 0
+    per_section = 10.0 / len(MIN_CHAR_COUNTS)
     sections = text_results.get("sections", {}) if "error" not in text_results else {}
     for key, min_count in MIN_CHAR_COUNTS.items():
         sec = sections.get(key, {})
         chars = sec.get("chars", 0)
         ratio = min(chars / min_count, 1.0) if min_count > 0 else 1.0
-        section_score += ratio * 5
+        section_score += ratio * per_section
         if chars < min_count:
             issues.append({"category": "section", "action": "increase_section_text", "detail": f"{key}: {chars}/{min_count}字", "section": key})
-    breakdown["sections"] = {"score": round(section_score, 1), "max": 30, "detail": f"{len([s for s in sections.values() if s.get('ok')])}/{len(MIN_CHAR_COUNTS)} セクション合格"}
+    breakdown["sections"] = {"score": round(section_score, 1), "max": 10, "detail": f"{len([s for s in sections.values() if s.get('ok')])}/{len(MIN_CHAR_COUNTS)} セクション合格"}
     score += section_score
+
+    # --- テキスト品質 (25点) ★NEW ---
+    if "error" not in quality_results:
+        quality_ratio = quality_results.get("score_ratio", 1.0)
+        quality_score = quality_ratio * 25
+        for qi in quality_results.get("issues", []):
+            if qi["type"] == "text_hole":
+                issues.append({
+                    "category": "text_quality",
+                    "action": "fix_text_holes",
+                    "detail": f"テキスト穴あき: {qi['description']} ({qi['count']}箇所)",
+                    "pattern": qi.get("pattern", ""),
+                })
+            elif qi["type"] == "empty_section":
+                issues.append({
+                    "category": "text_quality",
+                    "action": "fix_empty_section",
+                    "detail": f"空セクション: {qi.get('header', '')}",
+                })
+    else:
+        quality_score = 0
+    breakdown["text_quality"] = {"score": round(quality_score, 1), "max": 25, "detail": f"品質比率: {quality_results.get('score_ratio', 0):.0%}"}
+    score += quality_score
 
     # --- 数値要件 (20点: 付加価値額10点 + 給与10点) ---
     value_score = 0
@@ -335,7 +579,7 @@ def calculate_score(output_dir: Path, skip_diagrams: bool = False) -> dict:
                 rate_str = v.get("年率", "0%").replace("%", "")
                 try:
                     rate = float(rate_str)
-                    value_score += min(rate / 4.0, 1.0) * 10  # 4%が基準
+                    value_score += min(rate / 4.0, 1.0) * 10
                 except ValueError:
                     pass
                 issues.append({"category": "growth_rate", "action": "increase_growth_rate", "detail": f"付加価値額成長率: {v.get('年率', '?')}"})
@@ -347,7 +591,7 @@ def calculate_score(output_dir: Path, skip_diagrams: bool = False) -> dict:
                 rate_str = v.get("年率", "0%").replace("%", "")
                 try:
                     rate = float(rate_str)
-                    value_score += min(rate / 2.0, 1.0) * 10  # 2%が基準
+                    value_score += min(rate / 2.0, 1.0) * 10
                 except ValueError:
                     pass
                 issues.append({"category": "salary_rate", "action": "increase_salary_rate", "detail": f"給与支給総額成長率: {v.get('年率', '?')}"})
@@ -355,6 +599,28 @@ def calculate_score(output_dir: Path, skip_diagrams: bool = False) -> dict:
         issues.append({"category": "values", "action": "retry_generation", "detail": "数値チェック不能"})
     breakdown["values"] = {"score": round(value_score, 1), "max": 20}
     score += value_score
+
+    # --- 書類間数値整合性 (25点) ★NEW ---
+    if "error" not in consistency_results:
+        consistency_ratio = consistency_results.get("score_ratio", 1.0)
+        consistency_score = consistency_ratio * 25
+        for ci in consistency_results.get("issues", []):
+            if ci["type"] == "value_inconsistency":
+                issues.append({
+                    "category": "consistency",
+                    "action": "fix_value_inconsistency",
+                    "detail": f"書類間の数値不整合: {ci['description']}",
+                })
+            elif ci["type"] == "negative_profit":
+                issues.append({
+                    "category": "consistency",
+                    "action": "fix_negative_profit",
+                    "detail": f"営業利益がマイナス: {ci['description']}",
+                })
+    else:
+        consistency_score = 0
+    breakdown["consistency"] = {"score": round(consistency_score, 1), "max": 25, "detail": f"整合率: {consistency_results.get('score_ratio', 0):.0%}"}
+    score += consistency_score
 
     return {
         "score": round(score, 1),
@@ -366,6 +632,8 @@ def calculate_score(output_dir: Path, skip_diagrams: bool = False) -> dict:
             "diagrams": diagram_results,
             "text": text_results,
             "values": value_results,
+            "text_quality": quality_results,
+            "consistency": consistency_results,
         },
     }
 
