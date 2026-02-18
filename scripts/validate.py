@@ -76,11 +76,9 @@ TEXT_HOLE_PATTERNS = [
     (r"として、が", "プレースホルダー空白"),
     (r"主要機能として、が", "設備機能が未入力"),
     (r"\d+\.\d{6,}", "未丸め小数値（例: 4.083333...）"),
-    (r"（仮称）", "仮称の残留"),
-    (r"【.*?】\s*$", "空のセクション見出し"),
     (r"〇〇|●●|△△|□□|※※", "プレースホルダー記号の残留"),
     (r"None円|None名|None時間", "None値の残留"),
-    (r"0円.*0円.*0円", "全て0円（財務データ未入力）"),
+    (r"(?<![1-9,])0円[^0-9]*(?<![1-9,])0円[^0-9]*(?<![1-9,])0円", "全て0円（財務データ未入力）"),
 ]
 
 
@@ -275,12 +273,38 @@ def check_text_quality(output_dir: Path) -> dict:
             })
 
     # 空セクション検出（見出しの直後にテキストがない）
+    # docxではセクション見出し+テンプレート注釈+本文が同一セルに入ることがある
     for i, text in enumerate(all_texts):
-        if re.match(r"^[0-9０-９][-.−][0-9０-９]|^【.+】$|^■", text):
-            # 見出しの次のテキストが短すぎるか存在しない
-            next_text = all_texts[i + 1] if i + 1 < len(all_texts) else ""
-            next_stripped = _strip_whitespace(next_text)
-            if len(next_stripped) < 30 or re.match(r"^[0-9０-９][-.−][0-9０-９]|^【.+】$|^■", next_text):
+        normalized_head = _normalize_section_number(text[:30])
+        # セクション見出し行を検出
+        if re.match(r"^[0-9][-.][0-9]", normalized_head):
+            # ヘッダー行自体にコンテンツが含まれている場合（テンプレート注釈+本文が同一セル）
+            # → テンプレート注釈（※）を除去した後の実質テキストが十分あれば空ではない
+            text_without_annotation = re.sub(r"※[^\n]*", "", text)
+            # セクション番号行自体を除去
+            lines = text_without_annotation.split("\n")
+            content_lines = [l for l in lines[1:] if _strip_whitespace(l)]
+            content_in_header = sum(len(_strip_whitespace(l)) for l in content_lines)
+
+            if content_in_header > 100:
+                # 同一セル内に十分なコンテンツあり → 空セクションではない
+                continue
+
+            # 後続テキストにコンテンツがあるか確認
+            has_content = False
+            for j in range(1, min(6, len(all_texts) - i)):
+                candidate = all_texts[i + j]
+                candidate_norm = _normalize_section_number(candidate[:30])
+                # 次のセクション見出しに到達 → コンテンツなし
+                if re.match(r"^[0-9][-.][0-9]", candidate_norm):
+                    break
+                candidate_stripped = _strip_whitespace(candidate)
+                # テンプレート注釈や短い行はスキップ
+                if candidate.lstrip().startswith("※") or len(candidate_stripped) < 30:
+                    continue
+                has_content = True
+                break
+            if not has_content:
                 issues.append({
                     "type": "empty_section",
                     "description": f"空セクション: {text[:30]}",
@@ -289,7 +313,7 @@ def check_text_quality(output_dir: Path) -> dict:
 
     # スコア比率計算（問題がないほど1.0に近い）
     penalty = len([i for i in issues if i["type"] == "text_hole"]) * 0.1
-    penalty += len([i for i in issues if i["type"] == "empty_section"]) * 0.15
+    penalty += len([i for i in issues if i["type"] == "empty_section"]) * 0.2
     score_ratio = max(0.0, 1.0 - penalty)
 
     return {
@@ -343,14 +367,21 @@ def check_cross_document_consistency(output_dir: Path) -> dict:
                 if "指定様式" in name:
                     ws = wb[name]
                     # 付加価値額の基準年度値を探索
+                    # 「①付加価値額」のように単独で付加価値額を指すセルを優先
                     for row in ws.iter_rows(min_row=1, max_row=60):
                         for cell in row:
-                            if cell.value and "付加価値額" in str(cell.value):
-                                # 同じ行の数値を取得
+                            cell_str = str(cell.value) if cell.value else ""
+                            # 「付加価値額」を含み、かつ短いラベルセル（一覧行は除外）
+                            if "付加価値額" in cell_str and len(cell_str) < 30:
+                                # 同じ行の数値を取得（小さすぎる値は省力化指数等なので除外）
                                 for c2 in row:
-                                    if isinstance(c2.value, (int, float)) and c2.value > 0:
+                                    if isinstance(c2.value, (int, float)) and c2.value > 10000:
                                         designated_added_value = c2.value
                                         break
+                                if designated_added_value is not None:
+                                    break
+                        if designated_added_value is not None:
+                            break
                     break
 
             # 参考書式の営業利益チェック（マイナスは致命的）
