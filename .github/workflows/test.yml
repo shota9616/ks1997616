@@ -1,0 +1,26 @@
+name: Test
+
+on:
+  push:
+    branches: [shoryokuka]
+  pull_request:
+    branches: [shoryokuka]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install openpyxl python-docx pytest
+
+      - name: Run tests
+        working-directory: scripts
+        run: |
+          python -m pytest test_financial.py test_validate.py -v
