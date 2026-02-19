@@ -214,6 +214,8 @@ if st.button("書類を生成する", type="primary", disabled=(not can_generate
                         st.write(f"人件費: **{fin_data.get('人件費', 0):,}円**")
                         st.write(f"減価償却費: **{fin_data.get('減価償却費', 0):,}円**")
                         st.write(f"給与支給総額: **{fin_data.get('給与支給総額', 0):,}円**")
+                        # デバッグログ: PDF抽出結果がHearingDataに反映されたか確認
+                        print(f"[PDF抽出→HearingData] labor_cost={data.company.labor_cost:,}, depreciation={data.company.depreciation:,}, total_salary={data.company.total_salary:,}")
                         status.update(label="決算書PDF読み取り完了", state="complete")
                     else:
                         status.update(label="決算書PDF: データ抽出できず", state="error")
