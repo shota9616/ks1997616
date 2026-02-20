@@ -17,7 +17,7 @@
 
 from models import HearingData
 from config import Config
-from financial_utils import calc_base_components, calc_year_added_value
+from financial_utils import calc_base_components, calc_year_added_value, calc_cagr
 
 
 class ContentGenerator:
@@ -205,7 +205,26 @@ class ContentGenerator:
         # financial_utils.py で一元管理された計算を使用
         base = calc_base_components(self.data)
         base_added_value = base["added_value"]
-        growth = Config.GROWTH_RATE
+
+        # 5年間の付加価値額を実際に計算し、ブレンドCAGRを算出（★修正）
+        year_values = {}
+        for yr in range(0, 6):
+            year_values[yr] = calc_year_added_value(base, yr)
+
+        # 実際のブレンドCAGR（各構成要素の成長率が異なるため単純なGROWTH_RATEとは異なる）
+        actual_av_cagr = calc_cagr(base_added_value, year_values[5], 5)
+        actual_av_cagr_pct = actual_av_cagr * 100
+
+        # 各年の前年比成長率
+        year_growth_pcts = {}
+        for yr in range(1, 6):
+            prev = year_values[yr - 1]
+            if prev > 0:
+                year_growth_pcts[yr] = ((year_values[yr] / prev) - 1) * 100
+            else:
+                year_growth_pcts[yr] = 0.0
+
+        salary_growth_pct = (Config.SALARY_GROWTH_RATE - 1) * 100
 
         # Phase 4: 賃上げ計画データの反映
         wage_detail = ""
@@ -218,21 +237,18 @@ class ContentGenerator:
             else:
                 wage_detail += "次年度より実施予定である。"
 
-        growth_pct = (Config.GROWTH_RATE - 1) * 100
-        salary_growth_pct = (Config.SALARY_GROWTH_RATE - 1) * 100
-
-        return f"""本事業の実施により、当社は付加価値額の年率{growth_pct:.0f}%以上の向上を目指す。
+        return f"""本事業の実施により、当社は付加価値額の年平均成長率{actual_av_cagr_pct:.1f}%以上の向上を目指す。
 
 【付加価値額の向上計画】
-当社の付加価値額（営業利益＋人件費＋減価償却費）は、直近の2024年度実績で約{base_added_value:,}円である。本事業により省力化を実現し、業務効率を向上させることで、より多くの案件に対応可能となる。これにより、売上高の拡大を図りながら、付加価値額を毎年{growth_pct:.0f}%以上成長させていく計画である。
+当社の付加価値額（営業利益＋人件費＋減価償却費）は、直近の2024年度実績で約{base_added_value:,}円である。本事業により省力化を実現し、業務効率を向上させることで、より多くの案件に対応可能となる。これにより、売上高の拡大を図りながら、付加価値額を年平均{actual_av_cagr_pct:.1f}%以上成長させていく計画である。
 
 5年間の付加価値額推移の計画は以下のとおりである。
-基準年度：約{base_added_value:,}円
-1年目：約{int(base_added_value * growth):,}円（前年比+{growth_pct:.1f}%）
-2年目：約{int(base_added_value * growth ** 2):,}円（前年比+{growth_pct:.1f}%）
-3年目：約{int(base_added_value * growth ** 3):,}円（前年比+{growth_pct:.1f}%）
-4年目：約{int(base_added_value * growth ** 4):,}円（前年比+{growth_pct:.1f}%）
-5年目：約{int(base_added_value * growth ** 5):,}円（前年比+{growth_pct:.1f}%）
+基準年度：約{year_values[0]:,}円
+1年目：約{year_values[1]:,}円（前年比+{year_growth_pcts[1]:.1f}%）
+2年目：約{year_values[2]:,}円（前年比+{year_growth_pcts[2]:.1f}%）
+3年目：約{year_values[3]:,}円（前年比+{year_growth_pcts[3]:.1f}%）
+4年目：約{year_values[4]:,}円（前年比+{year_growth_pcts[4]:.1f}%）
+5年目：約{year_values[5]:,}円（前年比+{year_growth_pcts[5]:.1f}%）
 
 【給与支給総額の向上計画】
 生産性向上により創出した利益の一部を原資として、従業員への還元を行う。具体的には、1人当たり給与支給総額の年平均成長率{salary_growth_pct:.1f}%以上を達成する計画である。{wage_detail}

@@ -10,7 +10,7 @@ import openpyxl
 from models import HearingData
 from config import Config
 from hearing_reader import _find_sheet_in_workbook
-from financial_utils import calc_base_components, calc_year_added_value, calc_year_salary
+from financial_utils import calc_base_components, calc_year_added_value, calc_year_salary, calc_cagr
 
 
 def generate_business_plan_3(data: HearingData, output_dir: str, template_path: Path):
@@ -93,9 +93,15 @@ def generate_business_plan_3(data: HearingData, output_dir: str, template_path: 
             base_revenue = base["revenue"]
             base_op_profit = base["op_profit"]
             base_labor_cost = base["labor_cost"]
-            base_depreciation = base["depreciation"]
+            base_depreciation = base["depreciation"]  # 既存+新規合計
+            base_existing_dep = base["existing_depreciation"]
+            base_new_dep = base["new_depreciation"]
             base_salary = base["salary"]
             base_added_value = base["added_value"]
+
+            # 既存減価償却費と新規減価償却費の行も検索
+            row_existing_dep = find_row_by_label(ws_ref, ["既存減価償却", "うち既存"]) or None
+            row_new_dep = find_row_by_label(ws_ref, ["新規減価償却", "うち新規"]) or None
 
             # E列=基準, G〜K列=1〜5年目
             cols = ['E', 'G', 'H', 'I', 'J', 'K']
@@ -112,9 +118,15 @@ def generate_business_plan_3(data: HearingData, output_dir: str, template_path: 
                 # 人件費
                 if row_labor_cost:
                     ws_ref[f'{col}{row_labor_cost}'] = int(base_labor_cost * salary_growth)
-                # 減価償却費
+                # 減価償却費（合計: 既存+新規）
                 if row_depreciation:
                     ws_ref[f'{col}{row_depreciation}'] = int(base_depreciation)
+                # 既存減価償却費
+                if row_existing_dep:
+                    ws_ref[f'{col}{row_existing_dep}'] = int(base_existing_dep)
+                # 新規減価償却費（基準年は0、1年目以降は設備分）
+                if row_new_dep:
+                    ws_ref[f'{col}{row_new_dep}'] = int(base_new_dep) if i > 0 else 0
                 # 付加価値額（financial_utils で一元計算）
                 if row_added_value:
                     ws_ref[f'{col}{row_added_value}'] = calc_year_added_value(base, i)
@@ -127,15 +139,26 @@ def generate_business_plan_3(data: HearingData, output_dir: str, template_path: 
                 # 給与対象従業員数
                 ws_ref[f'{col}{row_salary_employees}'] = c.employee_count
 
-            # 成長率の確認ログ
+            # 成長率の確認ログ＋書き込み後アサーション
             year5_added_value = calc_year_added_value(base, 5)
-            if base_added_value > 0:
-                av_annual_growth = ((year5_added_value / base_added_value) ** (1/5) - 1) * 100
-                print(f"      📊 付加価値額: 基準{base_added_value:,}円 → 5年目{year5_added_value:,}円（年率{av_annual_growth:.1f}%）")
             year5_salary = calc_year_salary(base, 5)
+
+            if base_added_value > 0:
+                av_cagr = calc_cagr(base_added_value, year5_added_value, 5)
+                print(f"      📊 付加価値額: 基準{base_added_value:,}円 → 5年目{year5_added_value:,}円（年率{av_cagr*100:.1f}%）")
+                if av_cagr < Config.REQUIREMENT_ADDED_VALUE_CAGR:
+                    print(f"      ⚠️ 付加価値額CAGR {av_cagr*100:.2f}% < 要件{Config.REQUIREMENT_ADDED_VALUE_CAGR*100:.1f}%")
+
             if base_salary > 0:
-                sal_annual_growth = ((year5_salary / base_salary) ** (1/5) - 1) * 100
-                print(f"      📊 給与支給総額: 基準{base_salary:,}円 → 5年目{year5_salary:,}円（年率{sal_annual_growth:.1f}%）")
+                sal_cagr = calc_cagr(base_salary, year5_salary, 5)
+                print(f"      📊 給与支給総額: 基準{base_salary:,}円 → 5年目{year5_salary:,}円（年率{sal_cagr*100:.1f}%）")
+                if c.employee_count > 0:
+                    per_capita_cagr = sal_cagr  # 従業員数一定なら同じ
+                    if per_capita_cagr < Config.REQUIREMENT_SALARY_PER_CAPITA_CAGR:
+                        print(f"      ⚠️ 1人当たり給与CAGR {per_capita_cagr*100:.2f}% < 要件{Config.REQUIREMENT_SALARY_PER_CAPITA_CAGR*100:.1f}%")
+
+            # 減価償却費の内訳ログ
+            print(f"      📊 減価償却費: 既存{base_existing_dep:,}円 + 新規{base_new_dep:,}円 = 合計{base_depreciation:,}円")
 
             print("      ✅ 目標値データ入力完了")
 

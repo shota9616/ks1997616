@@ -10,7 +10,7 @@ from docx import Document
 
 from models import HearingData
 from config import Config
-from financial_utils import calc_base_components, calc_year_added_value
+from financial_utils import calc_base_components, calc_year_added_value, validate_financial_inputs, check_requirements
 from document_writer import generate_business_plan_1_2
 from plan3_writer import generate_business_plan_3
 from other_documents import generate_other_documents
@@ -201,7 +201,7 @@ def _apply_fixes(issues: list, data: HearingData) -> list:
 
         elif action == "increase_salary_rate":
             old = Config.SALARY_GROWTH_RATE
-            Config.SALARY_GROWTH_RATE = min(Config.SALARY_GROWTH_RATE + 0.005, 1.05)  # 上限5%
+            Config.SALARY_GROWTH_RATE = min(Config.SALARY_GROWTH_RATE + 0.005, 1.08)  # 上限8%
             if Config.SALARY_GROWTH_RATE != old:
                 fixes_applied.append(f"SALARY_GROWTH_RATE: {old} -> {Config.SALARY_GROWTH_RATE}")
 
@@ -459,6 +459,30 @@ def generate_with_auto_fix(
     Config.reset_rates()
 
     history = []
+
+    # === Phase 0: 事前バリデーションゲート（★追加）===
+    input_warnings = validate_financial_inputs(data)
+    if input_warnings:
+        print("\n⚠️ 入力データ事前チェック警告:")
+        for w in input_warnings:
+            print(f"  {w}")
+        if on_progress:
+            on_progress("pre_validation", 0, {"warnings": input_warnings})
+
+    # 要件チェック（生成前に成長率パラメータが要件を満たすか確認）
+    req_check = check_requirements(data)
+    if req_check["warnings"]:
+        print("\n⚠️ 要件充足チェック警告（生成前）:")
+        for w in req_check["warnings"]:
+            print(f"  {w}")
+        # SALARY_GROWTH_RATEが1人当たり要件を満たさない場合は自動調整
+        if not req_check["salary_per_capita_ok"]:
+            # 要件を満たす最小成長率を逆算: (1+r)^5 >= (1+0.035)^5
+            min_rate = 1 + Config.REQUIREMENT_SALARY_PER_CAPITA_CAGR
+            if Config.SALARY_GROWTH_RATE < min_rate:
+                old_rate = Config.SALARY_GROWTH_RATE
+                Config.SALARY_GROWTH_RATE = min_rate + 0.005  # 余裕を持たせる
+                print(f"  🔧 SALARY_GROWTH_RATE自動調整: {old_rate} → {Config.SALARY_GROWTH_RATE}")
 
     # === Phase 1: 書類品質ループ ===
     for iteration in range(1, max_iterations + 1):

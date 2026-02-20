@@ -52,19 +52,28 @@ uploaded = st.file_uploader(
     help="10シート＋財務情報シートを含むExcelファイル",
 )
 
-col1, col2 = st.columns(2)
-with col1:
+st.markdown("**決算書PDF（直近2期分アップロード可）**")
+fin_col1, fin_col2 = st.columns(2)
+with fin_col1:
     uploaded_financial = st.file_uploader(
-        "決算書 PDF（任意）",
+        "決算書 PDF — 直近期（任意）",
         type=["pdf"],
-        help="損益計算書を含む決算書。アップロードすると参考書式の財務データが正確になります。",
+        key="financial_latest",
+        help="直近期の損益計算書を含む決算書。アップロードすると参考書式の財務データが正確になります。",
     )
-with col2:
-    uploaded_registry = st.file_uploader(
-        "履歴事項全部証明書 PDF（任意）",
+with fin_col2:
+    uploaded_financial_prev = st.file_uploader(
+        "決算書 PDF — 前期（任意）",
         type=["pdf"],
-        help="法人登記簿。アップロードすると役員情報・会社情報が正確になります。",
+        key="financial_prev",
+        help="前期の損益計算書を含む決算書。2期分アップロードすると過年度の推計が不要になります。",
     )
+
+uploaded_registry = st.file_uploader(
+    "履歴事項全部証明書 PDF（任意）",
+    type=["pdf"],
+    help="法人登記簿。アップロードすると役員情報・会社情報が正確になります。",
+)
 
 # サンプルダウンロード
 sample_path = Path(__file__).parent / "examples" / "sample_hearing.xlsx"
@@ -111,7 +120,7 @@ if use_diagrams:
 
 # PDF読み取り用にも GEMINI_API_KEY を使用
 pdf_api_key = ""
-if uploaded_financial or uploaded_registry:
+if uploaded_financial or uploaded_financial_prev or uploaded_registry:
     env_key = os.environ.get("GEMINI_API_KEY", "")
     try:
         secrets_key = st.secrets.get("GEMINI_API_KEY", "")
@@ -181,50 +190,111 @@ if st.button("書類を生成する", type="primary", disabled=(not can_generate
             for issue in data_issues:
                 st.warning(f"データ警告: {issue}")
 
-        # 3. 決算書PDF読み取り（Gemini API）
+        # 3. 決算書PDF読み取り（Gemini API）— 直近2期分対応
+        fin_data_latest = None  # 直近期の抽出結果
+        fin_data_prev = None    # 前期の抽出結果
+
+        # 3a. 直近期の決算書
         if uploaded_financial and pdf_api_key:
-            with st.status("決算書PDFを読み取り中（Gemini API）...", expanded=True) as status:
+            with st.status("決算書PDF（直近期）を読み取り中...", expanded=True) as status:
                 try:
-                    fin_data = extract_financial_statements(
+                    fin_data_latest = extract_financial_statements(
                         uploaded_financial.getvalue(), pdf_api_key
                     )
-                    if fin_data:
-                        # HearingData の財務情報を上書き
-                        if fin_data.get("売上高", 0) > 0:
-                            data.company.revenue_2024 = fin_data["売上高"]
-                            data.company.revenue_2023 = int(fin_data["売上高"] / Config.GROWTH_RATE)
-                            data.company.revenue_2022 = int(fin_data["売上高"] / Config.GROWTH_RATE / Config.GROWTH_RATE)
-                        if fin_data.get("売上総利益", 0) > 0:
-                            data.company.gross_profit_2024 = fin_data["売上総利益"]
-                            data.company.gross_profit_2023 = int(fin_data["売上総利益"] / Config.GROWTH_RATE)
-                            data.company.gross_profit_2022 = int(fin_data["売上総利益"] / Config.GROWTH_RATE / Config.GROWTH_RATE)
-                        if "営業利益" in fin_data and fin_data["営業利益"] != 0:
-                            data.company.operating_profit_2024 = fin_data["営業利益"]
-                            data.company.operating_profit_2023 = int(fin_data["営業利益"] / Config.PROFIT_GROWTH_RATE)
-                            data.company.operating_profit_2022 = int(fin_data["営業利益"] / Config.PROFIT_GROWTH_RATE / Config.PROFIT_GROWTH_RATE)
-                        if fin_data.get("人件費", 0) > 0:
-                            data.company.labor_cost = fin_data["人件費"]
-                        if fin_data.get("減価償却費", 0) > 0:
-                            data.company.depreciation = fin_data["減価償却費"]
-                        if fin_data.get("給与支給総額", 0) > 0:
-                            data.company.total_salary = fin_data["給与支給総額"]
+                    if fin_data_latest:
+                        # 直近期データを CompanyInfo にマッピング
+                        if fin_data_latest.get("売上高", 0) > 0:
+                            data.company.revenue_2024 = fin_data_latest["売上高"]
+                        if fin_data_latest.get("売上総利益", 0) > 0:
+                            data.company.gross_profit_2024 = fin_data_latest["売上総利益"]
+                        if "営業利益" in fin_data_latest and fin_data_latest["営業利益"] != 0:
+                            data.company.operating_profit_2024 = fin_data_latest["営業利益"]
+                        if fin_data_latest.get("人件費", 0) > 0:
+                            data.company.labor_cost = fin_data_latest["人件費"]
+                        if fin_data_latest.get("減価償却費", 0) > 0:
+                            data.company.depreciation = fin_data_latest["減価償却費"]
+                        if fin_data_latest.get("給与支給総額", 0) > 0:
+                            data.company.total_salary = fin_data_latest["給与支給総額"]
+                        if fin_data_latest.get("決算期"):
+                            data.company.fiscal_period_latest = fin_data_latest["決算期"]
 
-                        st.write(f"売上高: **{fin_data.get('売上高', 0):,}円**")
-                        st.write(f"営業利益: **{fin_data.get('営業利益', 0):,}円**")
-                        st.write(f"人件費: **{fin_data.get('人件費', 0):,}円**")
-                        st.write(f"減価償却費: **{fin_data.get('減価償却費', 0):,}円**")
-                        st.write(f"給与支給総額: **{fin_data.get('給与支給総額', 0):,}円**")
-                        # デバッグログ: PDF抽出結果がHearingDataに反映されたか確認
-                        print(f"[PDF抽出→HearingData] labor_cost={data.company.labor_cost:,}, depreciation={data.company.depreciation:,}, total_salary={data.company.total_salary:,}")
-                        status.update(label="決算書PDF読み取り完了", state="complete")
+                        period_label = fin_data_latest.get("決算期", "直近期")
+                        st.write(f"📅 **{period_label}**")
+                        st.write(f"売上高: **{fin_data_latest.get('売上高', 0):,}円**")
+                        st.write(f"営業利益: **{fin_data_latest.get('営業利益', 0):,}円**")
+                        st.write(f"人件費: **{fin_data_latest.get('人件費', 0):,}円**")
+                        st.write(f"減価償却費: **{fin_data_latest.get('減価償却費', 0):,}円**")
+                        st.write(f"給与支給総額: **{fin_data_latest.get('給与支給総額', 0):,}円**")
+                        status.update(label=f"決算書PDF（{period_label}）読み取り完了", state="complete")
                     else:
-                        status.update(label="決算書PDF: データ抽出できず", state="error")
-                        st.warning("決算書PDFからデータを抽出できませんでした。ヒアリングシートの値を使用します。")
+                        status.update(label="決算書PDF（直近期）: データ抽出できず", state="error")
+                        st.warning("直近期の決算書PDFからデータを抽出できませんでした。ヒアリングシートの値を使用します。")
                 except Exception as e:
-                    status.update(label="決算書PDF読み取りエラー", state="error")
-                    st.warning(f"決算書PDF読み取りエラー: {e}")
+                    status.update(label="決算書PDF（直近期）読み取りエラー", state="error")
+                    st.warning(f"決算書PDF（直近期）読み取りエラー: {e}")
         elif uploaded_financial and not pdf_api_key:
             st.warning("GEMINI_API_KEY が未設定のため、決算書PDFの読み取りをスキップします。")
+
+        # 3b. 前期の決算書
+        if uploaded_financial_prev and pdf_api_key:
+            with st.status("決算書PDF（前期）を読み取り中...", expanded=True) as status:
+                try:
+                    fin_data_prev = extract_financial_statements(
+                        uploaded_financial_prev.getvalue(), pdf_api_key
+                    )
+                    if fin_data_prev:
+                        # 前期データを CompanyInfo にマッピング
+                        if fin_data_prev.get("売上高", 0) > 0:
+                            data.company.revenue_2023 = fin_data_prev["売上高"]
+                        if fin_data_prev.get("売上総利益", 0) > 0:
+                            data.company.gross_profit_2023 = fin_data_prev["売上総利益"]
+                        if "営業利益" in fin_data_prev and fin_data_prev["営業利益"] != 0:
+                            data.company.operating_profit_2023 = fin_data_prev["営業利益"]
+                        if fin_data_prev.get("人件費", 0) > 0:
+                            data.company.labor_cost_prev = fin_data_prev["人件費"]
+                        if fin_data_prev.get("減価償却費", 0) > 0:
+                            data.company.depreciation_prev = fin_data_prev["減価償却費"]
+                        if fin_data_prev.get("給与支給総額", 0) > 0:
+                            data.company.total_salary_prev = fin_data_prev["給与支給総額"]
+                        if fin_data_prev.get("決算期"):
+                            data.company.fiscal_period_prev = fin_data_prev["決算期"]
+
+                        period_label = fin_data_prev.get("決算期", "前期")
+                        st.write(f"📅 **{period_label}**")
+                        st.write(f"売上高: **{fin_data_prev.get('売上高', 0):,}円**")
+                        st.write(f"営業利益: **{fin_data_prev.get('営業利益', 0):,}円**")
+                        st.write(f"人件費: **{fin_data_prev.get('人件費', 0):,}円**")
+                        st.write(f"減価償却費: **{fin_data_prev.get('減価償却費', 0):,}円**")
+                        st.write(f"給与支給総額: **{fin_data_prev.get('給与支給総額', 0):,}円**")
+                        status.update(label=f"決算書PDF（{period_label}）読み取り完了", state="complete")
+                    else:
+                        status.update(label="決算書PDF（前期）: データ抽出できず", state="error")
+                        st.warning("前期の決算書PDFからデータを抽出できませんでした。")
+                except Exception as e:
+                    status.update(label="決算書PDF（前期）読み取りエラー", state="error")
+                    st.warning(f"決算書PDF（前期）読み取りエラー: {e}")
+        elif uploaded_financial_prev and not pdf_api_key:
+            st.warning("GEMINI_API_KEY が未設定のため、前期決算書PDFの読み取りをスキップします。")
+
+        # 3c. 前年度データの推計（前期PDFが無い場合のみ）
+        has_prev_pdf = fin_data_prev is not None
+        if fin_data_latest and not has_prev_pdf:
+            # 前期PDFが無い場合: 直近期の値から逆算で推計（従来方式）
+            if data.company.revenue_2024 > 0 and data.company.revenue_2023 == 0:
+                data.company.revenue_2023 = int(data.company.revenue_2024 / Config.GROWTH_RATE)
+            if data.company.gross_profit_2024 > 0 and data.company.gross_profit_2023 == 0:
+                data.company.gross_profit_2023 = int(data.company.gross_profit_2024 / Config.GROWTH_RATE)
+            if data.company.operating_profit_2024 != 0 and data.company.operating_profit_2023 == 0:
+                data.company.operating_profit_2023 = int(data.company.operating_profit_2024 / Config.PROFIT_GROWTH_RATE)
+            st.info("💡 前期の決算書PDFがないため、前年度データは推計値を使用しています。2期分アップロードすると正確な数値になります。")
+
+        # 前々期は常に推計（3期分アップロードは非対応）
+        if data.company.revenue_2023 > 0 and data.company.revenue_2022 == 0:
+            data.company.revenue_2022 = int(data.company.revenue_2023 / Config.GROWTH_RATE)
+        if data.company.gross_profit_2023 > 0 and data.company.gross_profit_2022 == 0:
+            data.company.gross_profit_2022 = int(data.company.gross_profit_2023 / Config.GROWTH_RATE)
+        if data.company.operating_profit_2023 != 0 and data.company.operating_profit_2022 == 0:
+            data.company.operating_profit_2022 = int(data.company.operating_profit_2023 / Config.PROFIT_GROWTH_RATE)
 
         # 4. 登記簿PDF読み取り（Gemini API）
         if uploaded_registry and pdf_api_key:

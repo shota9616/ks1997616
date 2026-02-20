@@ -448,6 +448,18 @@ def check_cross_document_consistency(output_dir: Path) -> dict:
     }
 
 
+def _find_row_by_label(ws, keywords, search_cols=('A', 'B', 'C', 'D'), max_row=60):
+    """シート内でキーワードに一致するラベル行を動的に検索する"""
+    for row in range(1, max_row + 1):
+        for col_letter in search_cols:
+            val = ws[f'{col_letter}{row}'].value
+            if val:
+                for kw in keywords:
+                    if kw in str(val):
+                        return row
+    return None
+
+
 def check_plan3_values(output_dir: Path) -> dict:
     """事業計画書その3の数値チェック"""
     if openpyxl is None:
@@ -477,30 +489,75 @@ def check_plan3_values(output_dir: Path) -> dict:
             }
             break
 
-    # 参考書式チェック
+    # 参考書式チェック（動的行検索）
     for name in wb.sheetnames:
         if "参考書式" in name or "目標値" in name:
             ws = wb[name]
-            base_revenue = ws['E26'].value
-            year5_revenue = ws['K26'].value
-            base_salary = ws['E44'].value
-            year5_salary = ws['K44'].value
 
-            if base_revenue and year5_revenue and base_revenue > 0:
-                revenue_growth = ((year5_revenue / base_revenue) ** (1/5) - 1) * 100
+            # 動的行検索（ハードコード行番号のフォールバック付き）
+            row_added_value = _find_row_by_label(ws, ["付加価値額"]) or 35
+            row_salary = _find_row_by_label(ws, ["給与支給総額"]) or 44
+            row_salary_employees = _find_row_by_label(ws, ["給与対象", "対象従業員"]) or 45
+            row_operating_profit = _find_row_by_label(ws, ["営業利益"])
+
+            # 付加価値額CAGR
+            base_av = ws[f'E{row_added_value}'].value
+            year5_av = ws[f'K{row_added_value}'].value
+
+            if base_av and year5_av and base_av > 0:
+                av_growth = ((year5_av / base_av) ** (1/5) - 1) * 100
                 results["付加価値額成長率"] = {
-                    "年率": f"{revenue_growth:.1f}%",
-                    "基準": "4.0%以上",
-                    "ok": round(revenue_growth, 1) >= 4.0,
+                    "年率": f"{av_growth:.1f}%",
+                    "基準": "3.0%以上（一般型）",
+                    "ok": round(av_growth, 1) >= 3.0,
                 }
+
+            # 給与支給総額CAGR
+            base_salary = ws[f'E{row_salary}'].value
+            year5_salary = ws[f'K{row_salary}'].value
 
             if base_salary and year5_salary and base_salary > 0:
                 salary_growth = ((year5_salary / base_salary) ** (1/5) - 1) * 100
                 results["給与支給総額成長率"] = {
                     "年率": f"{salary_growth:.1f}%",
-                    "基準": "2.0%以上",
-                    "ok": round(salary_growth, 1) >= 2.0,
+                    "基準": "3.5%以上（1人当たり）",
+                    "ok": round(salary_growth, 1) >= 3.5,
                 }
+
+            # 1人当たり給与支給総額CAGR（★追加）
+            base_emp_count = ws[f'E{row_salary_employees}'].value
+            year5_emp_count = ws[f'K{row_salary_employees}'].value
+            if (base_salary and year5_salary and base_salary > 0
+                    and base_emp_count and year5_emp_count
+                    and base_emp_count > 0 and year5_emp_count > 0):
+                base_per_capita = base_salary / base_emp_count
+                year5_per_capita = year5_salary / year5_emp_count
+                per_capita_growth = ((year5_per_capita / base_per_capita) ** (1/5) - 1) * 100
+                results["1人当たり給与支給総額成長率"] = {
+                    "年率": f"{per_capita_growth:.1f}%",
+                    "基準": "3.5%以上",
+                    "ok": round(per_capita_growth, 1) >= 3.5,
+                }
+
+            # 営業利益マイナスチェック（★追加）
+            if row_operating_profit:
+                negative_years = []
+                for col_letter, year_label in [('E', '基準'), ('G', '1年目'), ('H', '2年目'),
+                                                ('I', '3年目'), ('J', '4年目'), ('K', '5年目')]:
+                    val = ws[f'{col_letter}{row_operating_profit}'].value
+                    if isinstance(val, (int, float)) and val < 0:
+                        negative_years.append(f"{year_label}({val:,.0f}円)")
+                if negative_years:
+                    results["営業利益チェック"] = {
+                        "マイナス年度": ", ".join(negative_years),
+                        "ok": False,
+                    }
+                else:
+                    results["営業利益チェック"] = {
+                        "マイナス年度": "なし",
+                        "ok": True,
+                    }
+
             break
 
     wb.close()
@@ -606,33 +663,51 @@ def calculate_score(output_dir: Path, skip_diagrams: bool = False) -> dict:
     breakdown["text_quality"] = {"score": round(quality_score, 1), "max": 25, "detail": f"品質比率: {quality_results.get('score_ratio', 0):.0%}"}
     score += quality_score
 
-    # --- 数値要件 (20点: 付加価値額10点 + 給与10点) ---
+    # --- 数値要件 (20点: 付加価値額6点 + 給与支給総額6点 + 1人当たり給与4点 + 営業利益4点) ---
     value_score = 0
     if isinstance(value_results, dict) and "error" not in value_results:
         if "付加価値額成長率" in value_results:
             v = value_results["付加価値額成長率"]
             if v.get("ok"):
-                value_score += 10
+                value_score += 6
             else:
                 rate_str = v.get("年率", "0%").replace("%", "")
                 try:
                     rate = float(rate_str)
-                    value_score += min(rate / 4.0, 1.0) * 10
+                    value_score += min(rate / 3.0, 1.0) * 6
                 except ValueError:
                     pass
                 issues.append({"category": "growth_rate", "action": "increase_growth_rate", "detail": f"付加価値額成長率: {v.get('年率', '?')}"})
         if "給与支給総額成長率" in value_results:
             v = value_results["給与支給総額成長率"]
             if v.get("ok"):
-                value_score += 10
+                value_score += 6
             else:
                 rate_str = v.get("年率", "0%").replace("%", "")
                 try:
                     rate = float(rate_str)
-                    value_score += min(rate / 2.0, 1.0) * 10
+                    value_score += min(rate / 3.5, 1.0) * 6
                 except ValueError:
                     pass
                 issues.append({"category": "salary_rate", "action": "increase_salary_rate", "detail": f"給与支給総額成長率: {v.get('年率', '?')}"})
+        if "1人当たり給与支給総額成長率" in value_results:
+            v = value_results["1人当たり給与支給総額成長率"]
+            if v.get("ok"):
+                value_score += 4
+            else:
+                rate_str = v.get("年率", "0%").replace("%", "")
+                try:
+                    rate = float(rate_str)
+                    value_score += min(rate / 3.5, 1.0) * 4
+                except ValueError:
+                    pass
+                issues.append({"category": "per_capita_salary_rate", "action": "increase_salary_rate", "detail": f"1人当たり給与支給総額成長率: {v.get('年率', '?')}"})
+        if "営業利益チェック" in value_results:
+            v = value_results["営業利益チェック"]
+            if v.get("ok"):
+                value_score += 4
+            else:
+                issues.append({"category": "negative_profit", "action": "fix_negative_profit", "detail": f"営業利益マイナス: {v.get('マイナス年度', '?')}"})
     else:
         issues.append({"category": "values", "action": "retry_generation", "detail": "数値チェック不能"})
     breakdown["values"] = {"score": round(value_score, 1), "max": 20}

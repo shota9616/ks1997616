@@ -31,10 +31,17 @@ class CompanyInfo:
     operating_profit_2022: int = 0
     operating_profit_2023: int = 0
     operating_profit_2024: int = 0
-    # 付加価値額算出用（決算書PDFから取得）
+    # 付加価値額算出用（決算書PDFから取得）— 直近期
     labor_cost: int = 0           # 人件費合計
     depreciation: int = 0         # 減価償却費
     total_salary: int = 0         # 給与支給総額（役員報酬除く）
+    # 前期（2期分アップロード時に使用）
+    labor_cost_prev: int = 0      # 前期 人件費合計
+    depreciation_prev: int = 0    # 前期 減価償却費
+    total_salary_prev: int = 0    # 前期 給与支給総額
+    # 決算期ラベル
+    fiscal_period_latest: str = ""   # 直近期の決算期（例: "2024年3月期"）
+    fiscal_period_prev: str = ""     # 前期の決算期（例: "2023年3月期"）
 
 
 @dataclass
