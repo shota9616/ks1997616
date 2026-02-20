@@ -191,25 +191,99 @@ def calc_per_capita_salary_cagr(
     return calc_cagr(base_per_capita, year5_per_capita, years)
 
 
+def calc_labor_productivity_cagr(
+    base_added_value: int, year5_added_value: int, n_employees: int, years: int = 5
+) -> float:
+    """労働生産性（付加価値額÷従業員数）のCAGRを計算する
+
+    労働生産性 = 付加価値額 ÷ 従業員数
+    ※従業員数は計画期間中一定と仮定（省力化＝人を増やさず生産性向上）
+
+    Args:
+        base_added_value: 基準年の付加価値額
+        year5_added_value: 5年目の付加価値額
+        n_employees: 従業員数（計画期間中一定）
+        years: 計画年数（デフォルト5年）
+
+    Returns:
+        float: 労働生産性のCAGR
+    """
+    if n_employees <= 0 or base_added_value <= 0:
+        return 0.0
+    base_productivity = base_added_value / n_employees
+    year5_productivity = year5_added_value / n_employees
+    return calc_cagr(base_productivity, year5_productivity, years)
+
+
+def find_growth_rate_for_target_cagr(
+    data: HearingData, target_cagr: float = 0.04, margin: float = 0.005
+) -> float:
+    """労働生産性（＝付加価値額）CAGRが target_cagr を満たすための GROWTH_RATE を逆算する
+
+    減価償却費（成長率0%）の構成比が大きい場合、デフォルトのGROWTH_RATEでは
+    付加価値額全体のCAGRが目標に届かないことがある。
+    このメソッドで企業データに応じた最適なGROWTH_RATEを逆算する。
+
+    Args:
+        data: ヒアリングデータ
+        target_cagr: 目標CAGR（デフォルト0.04 = 4%）
+        margin: 余裕（デフォルト0.005 = 0.5%）
+
+    Returns:
+        float: 目標を満たすGROWTH_RATE（例: 1.11）
+    """
+    original_growth = Config.GROWTH_RATE
+    original_salary = Config.SALARY_GROWTH_RATE
+
+    lo, hi = 1.00, 1.50
+    result = hi
+
+    for _ in range(100):
+        mid = (lo + hi) / 2
+        Config.GROWTH_RATE = mid
+        base = calc_base_components(data)
+        y5 = calc_year_added_value(base, 5)
+        cagr = calc_cagr(base["added_value"], y5, 5)
+        if cagr < target_cagr:
+            lo = mid
+        else:
+            hi = mid
+            result = mid
+
+    # 元に戻す
+    Config.GROWTH_RATE = original_growth
+    Config.SALARY_GROWTH_RATE = original_salary
+
+    return result + margin
+
+
 def check_requirements(data: HearingData) -> dict:
     """補助金3要件の充足判定を行う
+
+    第5回公募要領準拠:
+    1. 付加価値額 年平均成長率(CAGR) ≧ 3.0%
+    2. 1人当たり給与支給総額 CAGR ≧ 3.5%（第5回から必須条件）
+    3. 労働生産性 CAGR ≧ 4.0%
 
     Args:
         data: ヒアリングデータ
 
     Returns:
         dict: {
-            "added_value_cagr": float,        # 付加価値額CAGR
-            "added_value_ok": bool,            # 要件充足か
-            "salary_per_capita_cagr": float,   # 1人当たり給与CAGR
-            "salary_per_capita_ok": bool,       # 要件充足か
-            "warnings": list[str],             # 未達の場合の警告
+            "added_value_cagr": float,           # 付加価値額CAGR
+            "added_value_ok": bool,              # 要件充足か
+            "salary_per_capita_cagr": float,     # 1人当たり給与CAGR
+            "salary_per_capita_ok": bool,         # 要件充足か
+            "labor_productivity_cagr": float,    # 労働生産性CAGR
+            "labor_productivity_ok": bool,        # 要件充足か
+            "all_ok": bool,                       # 全要件充足か
+            "warnings": list[str],               # 未達の場合の警告
         }
     """
     base = calc_base_components(data)
     warnings = []
 
-    # 付加価値額CAGR
+    # ① 付加価値額CAGR ≧ 3.0%
     year5_av = calc_year_added_value(base, 5)
     av_cagr = calc_cagr(base["added_value"], year5_av, 5)
     av_ok = av_cagr >= Config.REQUIREMENT_ADDED_VALUE_CAGR
@@ -219,7 +293,7 @@ def check_requirements(data: HearingData) -> dict:
             f"⚠️ 付加価値額CAGR {av_cagr*100:.2f}% < 要件{Config.REQUIREMENT_ADDED_VALUE_CAGR*100:.1f}%"
         )
 
-    # 1人当たり給与支給総額CAGR
+    # ② 1人当たり給与支給総額CAGR ≧ 3.5%
     n_employees = data.company.employee_count
     salary_cagr = calc_per_capita_salary_cagr(base["salary"], n_employees, 5)
     salary_ok = salary_cagr >= Config.REQUIREMENT_SALARY_PER_CAPITA_CAGR
@@ -229,16 +303,34 @@ def check_requirements(data: HearingData) -> dict:
             f"⚠️ 1人当たり給与CAGR {salary_cagr*100:.2f}% < 要件{Config.REQUIREMENT_SALARY_PER_CAPITA_CAGR*100:.1f}%"
         )
 
+    # ③ 労働生産性CAGR ≧ 4.0%
+    # 公募要領: 労働者数 = 従業員 + 役員（個人事業主・専従者含む）
+    n_workers = n_employees + data.company.officer_count
+    lp_cagr = calc_labor_productivity_cagr(
+        base["added_value"], year5_av, n_workers, 5
+    )
+    lp_ok = lp_cagr >= Config.REQUIREMENT_LABOR_PRODUCTIVITY_CAGR
+
+    if not lp_ok:
+        warnings.append(
+            f"⚠️ 労働生産性CAGR {lp_cagr*100:.2f}% < 要件{Config.REQUIREMENT_LABOR_PRODUCTIVITY_CAGR*100:.1f}%"
+        )
+
     # 営業利益が5年間のどこかでマイナスにならないかチェック
     for yr in range(1, 6):
         projected_op = int(base["op_profit"] * Config.GROWTH_RATE ** yr)
         if projected_op < 0:
             warnings.append(f"⚠️ {yr}年目の営業利益が{projected_op:,}円（マイナス）")
 
+    all_ok = av_ok and salary_ok and lp_ok
+
     return {
         "added_value_cagr": av_cagr,
         "added_value_ok": av_ok,
         "salary_per_capita_cagr": salary_cagr,
         "salary_per_capita_ok": salary_ok,
+        "labor_productivity_cagr": lp_cagr,
+        "labor_productivity_ok": lp_ok,
+        "all_ok": all_ok,
         "warnings": warnings,
     }

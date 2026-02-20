@@ -10,7 +10,7 @@ from docx import Document
 
 from models import HearingData
 from config import Config
-from financial_utils import calc_base_components, calc_year_added_value, validate_financial_inputs, check_requirements
+from financial_utils import calc_base_components, calc_year_added_value, validate_financial_inputs, check_requirements, find_growth_rate_for_target_cagr
 from document_writer import generate_business_plan_1_2
 from plan3_writer import generate_business_plan_3
 from other_documents import generate_other_documents
@@ -483,6 +483,18 @@ def generate_with_auto_fix(
                 old_rate = Config.SALARY_GROWTH_RATE
                 Config.SALARY_GROWTH_RATE = min_rate + 0.005  # 余裕を持たせる
                 print(f"  🔧 SALARY_GROWTH_RATE自動調整: {old_rate} → {Config.SALARY_GROWTH_RATE}")
+
+        # 労働生産性CAGR（≧4.0%）が未達の場合、GROWTH_RATEを逆算して引き上げ
+        if not req_check.get("labor_productivity_ok", True):
+            # 減価償却費（成長率0%）の構成比に応じて必要なGROWTH_RATEが異なるため、
+            # 企業データから逆算する
+            required_rate = find_growth_rate_for_target_cagr(
+                data, Config.REQUIREMENT_LABOR_PRODUCTIVITY_CAGR
+            )
+            if Config.GROWTH_RATE < required_rate:
+                old_rate = Config.GROWTH_RATE
+                Config.GROWTH_RATE = required_rate
+                print(f"  🔧 GROWTH_RATE自動調整（労働生産性要件）: {old_rate:.3f} → {Config.GROWTH_RATE:.3f}")
 
     # === Phase 1: 書類品質ループ ===
     for iteration in range(1, max_iterations + 1):

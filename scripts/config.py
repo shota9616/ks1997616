@@ -22,19 +22,19 @@ class Config:
 
     # 財務推計（デフォルト値）
     DEPRECIATION_YEARS = 5
-    GROWTH_RATE = 1.05  # 付加価値額の年間成長率（公募要領: 年率3%以上、余裕持ち5%）
+    GROWTH_RATE = 1.08  # 営業利益の年間成長率（労働生産性CAGR≧4%を確保するため高めに設定）
     SALARY_GROWTH_RATE = 1.04  # 給与支給総額の年間成長率（公募要領: 年率3.5%以上、余裕持ち4%）
-    PROFIT_GROWTH_RATE = 1.05  # 営業利益の年間成長率
+    PROFIT_GROWTH_RATE = 1.08  # 営業利益の年間成長率（GROWTH_RATEと同期）
 
-    # 補助金要件しきい値（一般型）
+    # 補助金要件しきい値（一般型 第5回公募要領準拠）
     REQUIREMENT_ADDED_VALUE_CAGR = 0.03       # 付加価値額 年平均成長率 ≥ 3%
-    REQUIREMENT_SALARY_PER_CAPITA_CAGR = 0.035  # 1人当たり給与支給総額 ≥ 3.5%
+    REQUIREMENT_SALARY_PER_CAPITA_CAGR = 0.035  # 1人当たり給与支給総額 ≥ 3.5%（第5回から必須）
     REQUIREMENT_LABOR_PRODUCTIVITY_CAGR = 0.04  # 労働生産性 ≥ 4%
 
     # 自動修正ループ用: デフォルト値（リセット用の不変定数）
-    _GROWTH_RATE_DEFAULT = 1.05
+    _GROWTH_RATE_DEFAULT = 1.08
     _SALARY_GROWTH_RATE_DEFAULT = 1.04
-    _PROFIT_GROWTH_RATE_DEFAULT = 1.05
+    _PROFIT_GROWTH_RATE_DEFAULT = 1.08
 
     @classmethod
     def reset_rates(cls):
