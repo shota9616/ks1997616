@@ -25,7 +25,7 @@ import openpyxl
 # scripts/ を import path に追加
 sys.path.insert(0, str(Path(__file__).parent))
 
-from main import (
+from models import (
     HearingData,
     CompanyInfo,
     LaborShortageInfo,
@@ -36,9 +36,9 @@ from main import (
     EmployeeInfo,
     ShareholderInfo,
     WorkProcess,
-    Config,
-    read_hearing_sheet,
 )
+from config import Config
+from hearing_reader import read_hearing_sheet
 
 # anthropic SDK
 try:

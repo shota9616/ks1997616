@@ -16,14 +16,11 @@ import streamlit as st
 # scripts/ を import path に追加
 sys.path.insert(0, str(Path(__file__).parent / "scripts"))
 
-from main import (
-    read_hearing_sheet,
-    generate_diagrams,
-    generate_with_auto_fix,
-    OfficerInfo,
-    Config,
-    validate_hearing_data,
-)
+from models import OfficerInfo
+from config import Config
+from hearing_reader import read_hearing_sheet, validate_hearing_data
+from diagram_generator import generate_diagrams
+from auto_fix import generate_with_auto_fix
 from validate import check_files, check_diagrams, check_docx_text, check_plan3_values, calculate_score
 from pdf_extractor import extract_financial_statements, extract_corporate_registry
 
